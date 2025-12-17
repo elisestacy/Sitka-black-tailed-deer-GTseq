@@ -1,0 +1,1119 @@
+---
+title: "SBTD_Tissue"
+author: "Elise Stacy"
+date: "2025-08-26"
+output: html_document
+---
+# Load packages
+```{r}
+# Additional filtering
+library(vcfR)
+library(SNPfiltR) 
+
+library(adegenet) # Locus div calcs
+library(pegas) # For HWE calcs
+
+# Data structure manipulation
+library(stringr)
+library(purrr)
+library(dplyr)
+library(tidyr)
+
+# Plotting
+library(ggplot2)
+library(gridExtra)
+library(maps)
+```
+## Load error calculation functions (code slightly modified from https://github.com/arianacerreta)
+```{r}
+## Scoring matching genotypes
+#make a function
+score_gt_match<-function(gt1,gt2){
+  #Handle missing genotypes
+  if (is.na(gt1) & is.na(gt2)) return("BothNA")
+  else if (is.na(gt1) | is.na(gt2)) return("OneNA")
+  
+  #split alleles
+  a1 <- unlist(strsplit(gt1, "[/|]"))
+  a2 <- unlist(strsplit(gt2, "[/|]"))
+  
+  #sort alleles for unphased comparison
+  a1<- sort(a1)
+  a2<- sort(a2)
+  
+  #score
+  if (identical(a1,a2)) return("Full Match")
+  else if (any(a1 %in% a2)) return("Partial Match")
+  else return("Mismatch")
+}
+
+format_paired_gt_df <- function(vcfR_samples, popmap_samples) {
+
+  # Extract base replicate IDs
+  popmap_samples <- popmap_samples %>%
+    mutate(ReplicateID = sub(".*_", "", id))
+
+  # Keep only replicate groups with >=2 samples
+  replicate_counts <- popmap_samples %>%
+    count(ReplicateID) %>%
+    filter(n >= 2)
+
+  # Filter popmap_samples to those with replicates
+  popmap_samples <- popmap_samples %>%
+    filter(ReplicateID %in% replicate_counts$ReplicateID)
+
+  # Subset VCF to matching sample names
+  # Ensure only selected samples are kept
+  sample_ids <- popmap_samples$id
+  vcfR_samples@gt <- vcfR_samples@gt[, c("FORMAT", sample_ids)]
+
+
+  # Extract GT matrix
+  gt_df <- extract.gt(vcfR_samples, element = "GT", as.numeric = FALSE) %>% as.data.frame()
+  gt_df$CHROM <- getCHROM(vcfR_samples)
+  gt_df$POS <- as.numeric(getPOS(vcfR_samples))
+  gt_df <- gt_df %>% relocate(CHROM, POS)
+
+  # Pivot to long format
+  gt_df <- pivot_longer(gt_df, cols = -c(CHROM, POS), names_to = "SampleID", values_to = "GT")
+  gt_df <- gt_df %>%
+    mutate(ReplicateID = sub(".*_", "", SampleID))
+
+  # Generate all pairwise combinations of replicates
+  replicate_map <- popmap_samples %>%
+    select(ReplicateID, id) %>%
+    group_by(ReplicateID) %>%
+    filter(n() >= 2) %>%
+    summarise(pair_df = list(as.data.frame(t(combn(id, 2)))), .groups = "drop") %>%
+    unnest(pair_df) %>%
+    rename(Sample1 = V1, Sample2 = V2)
+
+
+  # Join with genotypes
+  paired_gt_df <- replicate_map %>%
+    left_join(gt_df, by = c("Sample1" = "SampleID")) %>%
+    rename(GT1 = GT, CHROM = CHROM, POS = POS) %>%
+    left_join(gt_df, by = c("Sample2" = "SampleID", "CHROM", "POS")) %>%
+    rename(GT2 = GT)
+
+  return(paired_gt_df)
+}
+
+# Process data and create summaries in one function
+calculate_gt_pairs_errors <- function(paired_gt_df) {
+  # Create gt_pairs_mismatch dataframe
+  gt_pairs_mismatch <- paired_gt_df %>%
+    rowwise() %>%
+    mutate(MatchType = score_gt_match(GT1, GT2)) %>%
+    ungroup()
+  
+  # Calculate summary_by_pair
+  summary_by_pair <- gt_pairs_mismatch %>%
+    group_by(Sample1, Sample2) %>%
+    summarize(
+      N = n(),
+      Full_Match = sum(MatchType == "Full Match", na.rm = TRUE),
+      Partial_Match = sum(MatchType == "Partial Match", na.rm = TRUE),
+      Mismatch = sum(MatchType == "Mismatch", na.rm = TRUE),
+      Missing_Full = sum(MatchType == "BothNA", na.rm = TRUE),
+      Missing_Partial = sum(MatchType == "OneNA", na.rm = TRUE),
+      Full_Match_Rate = Full_Match / (Full_Match + Partial_Match + Mismatch),
+      Mismatch_Rate = (Mismatch + Partial_Match) / (Full_Match + Partial_Match + Mismatch),
+      Full_Missingness = Missing_Full / N,
+      Partial_Missingness = Missing_Partial / N,
+      Inclusive_Missingness = (Missing_Full + Missing_Partial) / N
+    )
+  
+  # Calculate summary_by_locus
+  summary_by_locus <- gt_pairs_mismatch %>%
+    group_by(CHROM, POS) %>%
+    summarize(
+      N=n(),
+      Full_Match = sum(MatchType == "Full Match", na.rm = TRUE),
+      Mismatch = sum(MatchType == "Mismatch", na.rm = TRUE),
+      Partial_Match = sum(MatchType == "Partial Match", na.rm = TRUE),
+      Missing_Full = sum(MatchType == "BothNA", na.rm = TRUE),
+      Missing_Partial = sum(MatchType == "OneNA", na.rm = TRUE),
+      Full_Match_Rate = Full_Match / (Full_Match + Partial_Match + Mismatch),
+      Both_Mismatch_Rate = (Partial_Match + Mismatch) / (Full_Match + Partial_Match + Mismatch),
+      Full_Missingness = Missing_Full / N,
+      Partial_Missingness = Missing_Partial / N,
+      Inclusive_Missingness = (Missing_Full + Missing_Partial) / N
+    )
+  
+  # Return both summaries
+  list(summary_by_pair = summary_by_pair,
+       summary_by_locus = summary_by_locus)
+}
+```
+# Read in sample data
+```{r}
+snps_vcfR <- read.vcfR("/mnt/ceph/estacy/SBTDeer/Tissue_samples/05_filter/populations_R0.5_mac2/populations.snps.vcf")
+
+locations <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Tissue_locations.csv", na.strings = c("","NA"))
+
+locations$Region[locations$Region == "Graham Island (Haida Gwaii)"] <- "Graham Island"
+
+# Just present broad regions - split regions to northern Southeast, mid Southeast, southern Southeast
+
+library(dplyr)
+
+locations <- locations %>%
+  mutate(
+    Populations = case_when(
+      Region %in% c("Gravina Island",
+                    "Revillagigedo Island",
+                    "Cleveland Peninsula") ~ "southern Southeast",
+      Region %in% c("Kupreanof Island", "Mitkof Island") ~ "middle Southeast",
+      Region == "Prince of Wales Island" ~ "P. of Wales Is.",
+      Broad_region == "northern Southeast" ~ "northern Southeast",
+      Broad_region == "Kodiak Archipelago" ~ "Kodiak",
+      Broad_region == "Southcentral" ~ "Southcentral",
+      Broad_region == "British Columbia" ~ "British Columbia",
+      Broad_region == "Haida Gwaii" ~ "Haida Gwaii",
+      Broad_region == NA ~ "Unknown"
+    )
+  )
+```
+
+# Subset (whitelist) to designed panel loci
+```{r}
+panel_snps <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
+
+# Whitelist snps panel was designed for only
+panel_snps <- panel_snps %>%
+  separate(V1, into = c("CHROM", "POS"), sep = "_")
+
+# Create combined keys
+vcf_keys <- paste(snps_vcfR@fix[, "CHROM"], snps_vcfR@fix[, "POS"], sep = "_")
+panel_keys <- paste(panel_snps$CHROM, panel_snps$POS, sep = "_")
+
+# Filter based on matching keys
+vcfR_panel <- snps_vcfR[vcf_keys %in% panel_keys, ]
+```
+# Filtering to compare schemes
+## Error rates in replicates
+```{r}
+vcfR <- vcfR_panel
+
+# Initialize storage data frames
+pair_errors <- data.frame()
+locus_errors <- data.frame()
+
+# Loop through depth values
+for (depth in seq(5,30, by = 5)) {
+  # Loop through missingness from 80% through fully missing
+    for (missing in seq(0.1,0.4, by = 0.05)) {
+    
+    # Apply hard filter with current depth and GQ
+    vcfR_filtered <- hard_filter(vcfR = vcfR, depth = depth, gq = 30)
+    vcfR_missing <- missing_by_sample(vcfR = vcfR_filtered, cutoff = missing)
+    
+    popmap_samples <- data.frame(id=colnames(vcfR_missing@gt)[2:length(colnames(vcfR_missing@gt))])
+
+    # Format paired genotype data frame
+    paired_gt_df <- format_paired_gt_df(vcfR_missing, popmap_samples)
+    
+    # Calculate error rate
+    error_rate <- calculate_gt_pairs_errors(paired_gt_df)
+    
+    # Add current Depth and GQ values to error summaries
+    pair_error <- cbind(error_rate$summary_by_pair, Depth = depth, Missing = missing)
+    locus_error <- cbind(error_rate$summary_by_locus, Depth = depth, Missing = missing)
+    
+    # Accumulate error data
+    pair_errors <- rbind(pair_errors, pair_error)
+    locus_errors <- rbind(locus_errors, locus_error)
+    }
+}
+```
+# Visualize error rate by filtering scheme
+```{r}
+pair_errors$ID_1 <- sub(".*_", "", pair_errors$Sample1)
+pair_errors$ID_2 <- sub(".*_", "", pair_errors$Sample2) 
+
+pair_err_summ <- pair_errors %>% # Summarize mismatch data
+  group_by(Depth, Missing) %>%
+  summarise(
+    N_Samples = n(),
+    Avg_Mismatch = round(mean(Mismatch_Rate, na.rm = TRUE), 4),
+    Max_Mismatch = round(max(Mismatch_Rate, na.rm = TRUE), 4),
+    Min_Locus_Overlap = min(((1 - Inclusive_Missingness) * N), na.rm = TRUE),
+    Avg_Missing = round(mean(Missing_Full, na.rm = TRUE), 1)
+  )
+
+png("figures/tissues_manuscript/Supp_error_rates.png", width = 6000, height = 6000, res = 600)
+# Plot error rates
+ggplot(pair_err_summ, aes(x=Missing, y = Depth, fill = Avg_Mismatch)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "lightblue", mid ="purple", high = "red", midpoint = 0.0025) +
+  geom_text(aes(label = N_Samples), color = "black", size = 3) +
+  labs(title = "Sample replicate pairs retained and average mismatch", subtitle = "Across Missingness filtering") +
+  xlab("Sample Missingness")
+dev.off()
+```
+# Select one replicate per lab_id with the lowest missing_data and highest depth
+```{r}
+# Data frame of full unique IDs and lab IDs
+sample_ids <- data.frame(id = sub(".*_", "", colnames(vcfR_panel@gt)[-1]), full_id = colnames(vcfR_panel@gt)[-1])
+# Create set of replicate only ids
+replicates <- sample_ids %>%
+  group_by(id) %>%
+  filter(n() > 1)
+# Create vectors of replicate vs not rep samples
+replicate_samples <- intersect(colnames(vcfR_panel@gt)[-1], replicates$full_id)
+non_rep_samples <- setdiff(colnames(vcfR_panel@gt)[-1], replicates$full_id)
+
+# Seperate vcfR objects in replicated samples and non rep objects
+vcfR_reps <- vcfR_panel[samples = replicate_samples]
+vcfR_non_reps <- vcfR_panel[samples = non_rep_samples]
+
+# Apply locus filters
+vcfR_reps_filt <- hard_filter(vcfR_reps, gq = 30, depth = 10)
+vcfR_reps_filt <- min_mac(vcfR_reps_filt, min.mac = 2)
+
+# Calculate missingness and depth by sample
+missing_df_reps <- missing_by_sample(vcfR_reps_filt)
+rep_stats <- missing_df_reps$unfiltered.stats
+rep_stats$id <- sub(".*_", "", rep_stats$samples) # Format base sample ID only column
+
+best_replicate <- rep_stats %>%
+  group_by(id) %>%
+  slice_min(prop.missing, with_ties = TRUE) %>% # Choose replicate with least missing data, allowing ties
+  slice_max(mean.depth, with_ties = FALSE) %>% # Only paired should be ties now, choose replicate with greatest depth
+  ungroup()
+
+popmap_unique <- data.frame(id = c(best_replicate$samples, non_rep_samples))
+
+vcfR_unique <- vcfR_panel[samples = popmap_unique$id]
+```
+# Panel locus filtering
+```{r}
+vcfR_dp <- hard_filter(vcfR_unique, gq = 30, depth = 10)
+vcfR_missing <- missing_by_sample(vcfR_dp, cutoff = 0.2)
+vcfR_mac <- min_mac(vcfR_missing, min.mac = 2)
+vcfR_snp_miss <- missing_by_snp(vcfR_mac, cutoff = 0.5)
+
+vcfR_panel_filt <- vcfR_snp_miss
+```
+### Mean depth
+```{r}
+dp <- extract.gt(vcfR_panel_filt, element = "DP", as.numeric=TRUE)
+
+colMeans(dp, na.rm = T) %>% mean(na.rm = T)
+colMeans(dp, na.rm = T) %>% min()
+colMeans(dp, na.rm = T) %>% max()
+```
+# Format popmap
+```{r}
+popmap <- data.frame(id=colnames(vcfR_panel_filt@gt)[-1])
+
+popmap_relabeled <- data.frame(id = sub(".*_", "", popmap$id))
+
+sample_locations <- left_join(popmap_relabeled, locations, by = c("id"="UI.Barcode"))
+
+popmap_relabeled$pop <- sample_locations$Populations
+
+popmap_relabeled$pop <- factor(popmap_relabeled$pop, levels = c("Kodiak", "Southcentral", "northern Southeast", "middle Southeast", "southern Southeast", "P. of Wales Is.","British Columbia", "Haida Gwaii", "Unknown"))
+
+colnames(vcfR_panel_filt@gt) <- c("FORMAT", popmap_relabeled$id)
+```
+## Map
+### Format data to map
+```{r}
+locations$Populations <- factor(locations$Populations, levels = c("Kodiak", "Southcentral", "northern Southeast", "middle Southeast", "southern Southeast", "P. of Wales Is.", "British Columbia", "Haida Gwaii", "Unknown"))
+
+# Sample size by location
+
+locations_clean <- locations %>% filter(!is.na(Lon)) %>% filter(!is.na(UI.Barcode))
+
+locations_clean <- locations_clean %>%
+  group_by(Populations) %>%
+  mutate(Population_n = paste(Populations," (n=", n(), ")", sep = "")) %>%
+  ungroup()
+
+SBTD_sites <- locations_clean[locations_clean$UI.Barcode %in% popmap_relabeled$id, ] # Plot samples with locations that passed filtering
+
+labels_vector <- setNames(
+  unique(SBTD_sites$Population_n),
+  unique(SBTD_sites$Populations))
+
+populations_color_pal <- c("#f9d5a9","#b5dee4","#3a7380","#eca255","#b45f06","#863e19","#682502","#431801","grey")
+```
+# Plot and save map of samples
+```{r}
+# get world map data
+world_map_df <- map_data("world")
+
+png("figures/tissues_manuscript/SBTD_sites_map.png", width = 6000, height = 6000, res = 600)
+
+ggplot() +
+  geom_polygon(data = world_map_df,
+               aes(x = long, y = lat, group = group),
+               fill = "grey98",
+               colour = "grey50") +
+  geom_point(data = locations_clean,
+             aes(x = Lon, y = Lat,
+                 fill = Populations),
+             size = 4, shape = 21, stroke = .2) +
+  scale_fill_manual(
+    values = populations_color_pal,
+    labels = labels_vector,
+    guide = guide_legend(ncol = 1)
+  ) +
+  coord_quickmap(xlim = c(-155, -124), ylim = c(52.5, 62)) +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude") +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.key.size = unit(0.1, "cm"),
+    legend.text = element_text(size = 16),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16)
+  )
+
+dev.off()
+```
+# Plot region popout map
+```{r}
+# Plot region map
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+
+# Get USA states
+states <- ne_states(country = "United States of America", returnclass = "sf")
+
+# Get Canada provinces/territories (Admin-1)
+canada <- ne_states(country = "Canada", returnclass = "sf")
+
+# Combine for labeling
+regions <- rbind(
+  states %>% select(name, geometry),
+  canada %>% select(name, geometry)
+)
+
+# Compute label positions
+regions_centroids <- st_centroid(regions)
+
+regions_centroids <- regions_centroids %>%
+  mutate(
+    label_x = st_coordinates(geometry)[,1],
+    label_y = st_coordinates(geometry)[,2]
+  )
+
+# Move BC label slightly up and to the right, remove NWT
+regions_centroids <- regions_centroids %>%
+  mutate(
+    label_x = ifelse(name == "British Columbia", label_x - 2.15, label_x),
+    label_y = ifelse(name == "British Columbia", label_y + 3.75, label_y),
+    label_name = ifelse(name == "British Columbia", "British\nColumbia", name)
+  ) %>%
+  filter(name != "Northwest Territories")  # <<< remove NWT label
+
+
+regions_centroids <- regions_centroids %>%
+  mutate(
+    label_name = ifelse(name == "British Columbia", "British\nColumbia", name)
+  )
+
+
+png("figures/tissues_manuscript/region_map.png", width = 6000, height = 6000, res = 600)
+
+ggplot() +
+  geom_sf(data = ne_countries(scale = 50, returnclass = "sf"),
+          fill = "grey", color = "grey70") +
+  geom_sf(data = states, fill = NA, color = "#444444", size = 1.5) +
+  geom_sf(data = canada, fill = NA, color = "#444444", size = 1.5) +
+  geom_text(
+    data = regions_centroids,
+    aes(x = label_x, y = label_y, label = label_name),
+    size = 14,
+    fontface = "bold",
+    color = "black"
+  ) +
+  coord_sf(xlim = c(-168, -119), ylim = c(49, 71.5), expand = FALSE) +
+  theme_void() +  # <<< removes all background lines
+  theme(
+    text = element_text(size = 22)
+  )
+
+dev.off()
+```
+# PCA
+```{r}
+pca <- assess_missing_data_pca(vcfR=vcfR_panel_filt, popmap = popmap_relabeled, clustering = FALSE)
+```
+## Format for region labeled PCA figure
+### Add sample size labels
+```{r}
+# Population order (controls legend order)
+pop_order <- c(
+  "Kodiak",
+  "Southcentral",
+  "northern Southeast",
+  "middle Southeast",
+  "southern Southeast",
+  "P. of Wales Is.",
+  "British Columbia",
+  "Haida Gwaii",
+  "Unknown"
+)
+
+pca$pop <- factor(pca$pop, levels = pop_order)
+
+# Create population sample-size labels
+pop_label_df <- pca %>%
+  count(pop, name = "n") %>%
+  mutate(label = paste0(pop, " (n=", n, ")"))
+
+# Named vector of labels in pop_order
+pop_labels_pca <- setNames(
+  pop_label_df$label[match(pop_order, pop_label_df$pop)],
+  pop_order
+)
+
+# Shape palette (named)
+populations_shape_pal <- c(
+  "Kodiak" = 21,
+  "Southcentral" = 22,
+  "northern Southeast" = 21,
+  "middle Southeast" = 24,
+  "southern Southeast" = 22,
+  "P. of Wales Is." = 23,
+  "British Columbia" = 25,
+  "Haida Gwaii" = 21,
+  "Unknown" = 23
+)
+
+# Color palette (named)
+populations_color_pal_pca <- c(
+  "Kodiak" = "#f9d5a9",
+  "Southcentral" = "#b5dee4",
+  "northern Southeast" = "#3a7380",
+  "middle Southeast" = "#eca255",
+  "southern Southeast" = "#b45f06",
+  "P. of Wales Is." = "#863e19",
+  "British Columbia" = "#682502",
+  "Haida Gwaii" = "#431801",
+  "Unknown" = "grey"
+)
+```
+# Plot and save PCAs
+```{r}
+png("figures/tissues_manuscript/SBTD_pca.png", width = 6000, height = 6000, res = 600)
+
+ggplot() +
+  # All populations except BC & Unknown
+  geom_point(
+    data = subset(pca, !pop %in% c("British Columbia", "Unknown")),
+    aes(x = PC1, y = PC2, fill = pop, shape = pop),
+    size = 10, stroke = 0.5, alpha = 0.9
+  ) +
+
+  # BC & Unknown plotted on top
+  geom_point(
+    data = subset(pca, pop %in% c("British Columbia", "Unknown")),
+    aes(x = PC1, y = PC2, fill = pop, shape = pop),
+    size = 10, stroke = 0.5, alpha = 0.9
+  ) +
+
+  scale_fill_manual(
+    values = populations_color_pal_pca,
+    labels = pop_labels_pca,
+    breaks = pop_order
+  ) +
+
+  scale_shape_manual(
+    values = populations_shape_pal,
+    labels = pop_labels_pca,
+    breaks = pop_order
+  ) +
+
+  theme_light() +
+  guides(
+    fill  = guide_legend(order = 1, ncol = 2),
+    shape = guide_legend(order = 1, ncol = 2)
+  ) +
+
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.key.size = unit(0.1, "cm"),
+    legend.text = element_text(size = 24),
+    axis.text = element_text(size = 24),
+    axis.title = element_text(size = 24)
+  ) +
+
+  labs(
+    x = "PC1 12.91% variance explained",
+    y = "PC2 5.29% variance explained"
+  )
+
+dev.off()
+
+png("figures/tissues_manuscript/SBTD_pca_2_3.png", width = 6000, height = 6000, res = 600)
+
+ggplot() +
+  # 1. Plot all populations except Unknown
+  geom_point(
+    data = subset(pca, pop != "Unknown"),
+    aes(x = PC2, y = PC3, fill = pop, shape = pop),
+    size = 7, stroke = 0.5, alpha = 0.9
+  ) +
+
+  # 2. Plot Unknown samples on top
+  geom_point(
+    data = subset(pca, pop == "Unknown"),
+    aes(x = PC1, y = PC2, fill = pop, shape = pop),
+    size = 7, stroke = 0.5, alpha = 0.9
+  ) +
+
+  scale_fill_manual(
+    values = populations_color_pal,
+    labels = pop_labels_pca
+  ) +
+
+  # Add shape scaling
+  scale_shape_manual(
+    values = populations_shape_pal,    # <-- You must define this vector
+    labels = pop_labels_pca
+  ) +
+
+  theme_light() +
+  guides(
+    fill = guide_legend(order = 1, ncol = 3),
+    shape = guide_legend(order = 1, ncol = 3)
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.key.size = unit(0.1, "cm"),
+    legend.text = element_text(size = 16),
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16)
+  #) +
+  #labs(
+  #  x = "PC1 XX% variance explained",
+  #  y = "PC2 XX% variance explained"
+  )
+
+dev.off()
+```
+### Plot PCA by missingness
+```{r}
+png("figures/tissues_manuscript/SBTD_pca_missing_region.png", width = 6000, height = 3000, res = 600)
+
+ggplot(data = pca, aes(x = PC1, y = PC2, color = pop, fill = missing)) +
+  scale_color_manual(
+    values = populations_color_pal,
+    labels = pop_labels_pca) +
+  scale_fill_gradient(
+  low = "lightgrey",
+  high = "black"
+) +
+  geom_point(size = 4, stroke = 1, shape = 21, alpha = 0.9) +
+  theme_light() +
+  theme()
+
+dev.off()
+```
+# Relatedness 
+Remove related individuals before Admixture
+Running trioml on server, submission script: submit_related.sh and related.R
+```{r}
+library(related)
+
+data(GenotypeData)
+input <- readgenotypedata(GenotypeData)
+
+ext.gt <- extract.gt(vcfR_panel_filt) %>% 
+                                 t() %>%
+                     as.data.frame() %>%
+                     rownames_to_column(var = "ID")
+
+gt_split <- ext.gt %>%
+  mutate(across(-ID, ~strsplit(., "/"))) %>%
+  unnest_wider(where(is.list), names_sep = "_") %>%
+  mutate(across(-ID, as.numeric)) %>% 
+  mutate(across(
+    -ID,
+    ~ case_when(
+      is.na(.x) ~ 0,
+      .x == 0   ~ 1,
+      .x == 1   ~ 2,
+      TRUE ~ .x    # keeps any unexpected values unchanged
+    )
+  ))
+
+# Format one input file per population - running relatedness by population/region
+gt_pop <- left_join(popmap_relabeled, gt_split, by = c("id" = "ID"))
+
+gt_nSE <- gt_pop %>% filter(pop == "northern Southeast" | pop == "Unknown") %>% select(!pop)
+gt_SC <- gt_pop %>% filter(pop == "Southcentral") %>% select(!pop)
+gt_SE <- gt_pop %>% filter(pop == "middle Southeast" | pop == "southern Southeast" | pop == "British Columbia") %>% select(!pop)
+gt_KA <- gt_pop %>% filter(pop == "Kodiak Archipelago") %>% select(!pop)
+gt_HG <- gt_pop %>% filter(pop == "Haida Gwaii Archipelago") %>% select(!pop)
+
+input_nSE <- readgenotypedata(gt_nSE)
+input_SC <- readgenotypedata(gt_SC)
+input_SE <- readgenotypedata(gt_SE)
+input_KA <- readgenotypedata(gt_KA)
+input_HG <- readgenotypedata(gt_HG)
+
+saveRDS(input_nSE, "Relatedness/input_nSE.rds")
+saveRDS(input_SC, "Relatedness/input_SC.rds")
+saveRDS(input_SE, "Relatedness/input_SE.rds")
+saveRDS(input_KA, "Relatedness/input_KA.rds")
+saveRDS(input_HG, "Relatedness/input_HG.rds")
+```
+## Relatedness results and filter out first order relatedness
+```{r}
+HG_related <- readRDS(file = "Relatedness/output_HG_related.rds")
+KA_related <- readRDS(file = "Relatedness/output_KA_related.rds")
+nSE_related <- readRDS(file = "Relatedness/output_nSE_related.rds")
+SE_related <- readRDS(file = "Relatedness/output_SE_related.rds")
+SC_related <- readRDS(file = "Relatedness/output_SC_related.rds")
+
+all_related <- rbind(data.frame("ind1" = HG_related$relatedness$ind1.id, "ind2" = HG_related$relatedness$ind2.id, "trioml" = HG_related$relatedness$trioml, "pop" = "HG"),
+      data.frame("ind1" = KA_related$relatedness$ind1.id, "ind2" = KA_related$relatedness$ind2.id, "trioml" = KA_related$relatedness$trioml, "pop" = "KA"),
+      data.frame("ind1" = nSE_related$relatedness$ind1.id, "ind2" = nSE_related$relatedness$ind2.id, "trioml" = nSE_related$relatedness$trioml, "pop" = "nSE"),
+      data.frame("ind1" = SE_related$relatedness$ind1.id, "ind2" = SE_related$relatedness$ind2.id, "trioml" = SE_related$relatedness$trioml, "pop" = "SE"),
+      data.frame("ind1" = SC_related$relatedness$ind1.id, "ind2" = SC_related$relatedness$ind2.id, "trioml" = SC_related$relatedness$trioml, "pop" = "SC"))
+
+first_order <- all_related %>% filter(trioml > 0.4)
+
+remove <- unique(first_order$ind1) #remove for admixture analysis
+```
+# Run admixture population clustering
+Admixture script: run_admixture.sh and python wrapper (cite)
+```{r}
+vcfR_panel_filt_rel <- vcfR_panel_filt[, !colnames(vcfR_panel_filt@gt) %in% remove]
+
+vcfR::write.vcf(vcfR_panel_filt_rel, "data/vcfR_panel_filt_rel.vcf.gz") # Test filt/shared loci
+```
+## Admixture
+#### CV error
+```{r figures-side, out.width="30%", echo=FALSE, warning=FALSE}
+library(ggplot2)
+WR_CV_error <- read.delim("Admixture/panel_loci/related_removed/related_removed.CV_Avg.txt")
+
+png("figures/tissues_manuscript/Supp_CV_error.png", width = 6000, height = 4000, res = 600)
+ggplot(WR_CV_error, aes(x=K, y=CV_Avg)) + 
+  geom_line() +
+  geom_pointrange(aes(ymin=CV_Avg-CV_Stdev, ymax=CV_Avg+CV_Stdev), size = 0.3) +
+  labs(title = "") +
+  xlab("K-value") + ylab("Cross Validation Error Average") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20))
+dev.off()
+```
+### Admixture barplots
+### Read in Admixture results files
+```{r}
+library(pophelper)
+
+afiles <- list.files("Admixture/panel_loci/related_removed/Outputs-related_removed/", , full.names = T, pattern = "\\.Q$")
+
+alist <- readQ(files=afiles)
+```
+### Summarize Admixture runs
+```{r}
+summariseQ(tabulateQ(alist))
+```
+### Row labels
+```{r}
+popmap_rel <- popmap_relabeled[ popmap_relabeled$id %in% colnames(vcfR_panel_filt_rel@gt), ]
+
+sites <- data.frame("id" = locations$UI.Barcode, "site" = locations$Region)
+sites$site[is.na(sites$site)] <- "Unknown"
+
+popmap_rel <- left_join(popmap_rel, sites)
+
+rownames(alist[[1]]) <- popmap_rel$id
+
+labels <-  data.frame(site = as.character(popmap_rel$site), pop = as.character(popmap_rel$pop))
+
+labels[labels == "British Columbia"] <- "B.C."
+```
+## View barplots K = 2 through 6
+```{r}
+# Organize
+qlist <- alist[c(11,16,21,26,31)]
+
+rownames(qlist$related_removed.2.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.2.1.Q))
+rownames(qlist$related_removed.3.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.3.1.Q))
+rownames(qlist$related_removed.4.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.4.1.Q))
+rownames(qlist$related_removed.5.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.5.1.Q))
+rownames(qlist$related_removed.6.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.6.1.Q))
+
+qlist$related_removed.4.1.Q <- data.frame("Cluster1" = qlist$related_removed.4.1.Q$Cluster3, "Cluster2" = qlist$related_removed.4.1.Q$Cluster2, "Cluster3" = qlist$related_removed.4.1.Q$Cluster4, "Cluster4" = qlist$related_removed.4.1.Q$Cluster1)
+
+qlist$related_removed.5.1.Q <- data.frame("Cluster1" = qlist$related_removed.5.1.Q$Cluster1, "Cluster2" = qlist$related_removed.5.1.Q$Cluster4, "Cluster3" = qlist$related_removed.5.1.Q$Cluster5, "Cluster4" = qlist$related_removed.5.1.Q$Cluster2, "Cluster5" = qlist$related_removed.5.1.Q$Cluster3)
+
+arrange(qlist$related_removed.6.1.Q, desc(Cluster6))
+
+qlist$related_removed.6.1.Q <- data.frame("Cluster1" = qlist$related_removed.6.1.Q$Cluster6, "Cluster2" = qlist$related_removed.6.1.Q$Cluster3, "Cluster3" = qlist$related_removed.6.1.Q$Cluster4, "Cluster4" = qlist$related_removed.6.1.Q$Cluster2, "Cluster5" = qlist$related_removed.6.1.Q$Cluster1, "Cluster6" = qlist$related_removed.6.1.Q$Cluster5)
+```
+### Plot
+```{r}
+# Define your custom color palette
+#"#fce5c9","#b5dee4","#3a7380","#f6b26b","#b45f06","#682502","#431801"
+
+my_colors <- c("#6aa8b1","#f9d5a9","#431801","#eca255","#b45f06","#783513")  # Replace/add colors as needed for your K
+
+# Plot with custom colors
+p <- plotQ(
+  qlist = qlist,
+  imgoutput = "join",
+  returnplot = TRUE,
+  exportplot = FALSE,
+  basesize = 10,
+  grplab = labels,
+  ordergrp = TRUE,
+  subsetgrp = c("Sitkalidak Island", "Uganik Island", "Kodiak Island", "Whale Island", "Afognak Island", "Hinchinbrook Island", "Hawkins Island", "Shelter Island", "Mainland Juneau", "Douglas Island", "Admiralty Island", "Chichagof Island", "Baranof Island", "Krestof Island", "Partofshikof Island", "Kruzof Island", "Unknown", "Mitkof Island", "Kupreanof Island", "Cleveland Peninsula", "Revillagigedo Island", "Gravina Island", "Prince of Wales Island", "B.C.", "Graham Island"),
+  grplabangle = 0,
+  grplabsize = 4,
+  linesize = 0,
+  pointsize = 10,
+  grplabpos = 0.5,
+  grplabspacer = 0.5,
+  grplabjust = 0.5,
+  grplabheight = 30,
+  splabsize = 28,
+  divgrp = "pop",
+  divsize = 1,
+  divtype = 1,
+  clustercol = my_colors   # <--- custom color palette here
+)
+
+#c("Kodiak", "Southcentral", "northern Southeast", "Unknown", "middle Southeast", "southern Southeast", "B.C.", "Haida Gwaii")
+png("figures/tissues_manuscript/SBTD_admixture.png", width = 6000, height = 6000, res = 600)
+grid.arrange(p$plot[[1]])
+dev.off()
+```
+# Locus variability and utility by population
+## Format data
+```{r}
+popmap_var <- data.frame(id = popmap_relabeled$id, pop = as.character(popmap_relabeled$pop))
+## Combine BC with SE since low sample size and groups as a population, put NA samples in the  SE/BC group
+popmap_var$pop[popmap_var$pop == "British Columbia"] <- "P. of Wales Is. & B.C."
+popmap_var$pop[popmap_var$pop == "P. of Wales Is."] <- "P. of Wales Is. & B.C."
+popmap_var$pop[popmap_var$pop == "Unknown"] <- "northern Southeast"
+
+genind <- vcfR2genind(vcfR_panel_filt)
+pop(genind) <- popmap_var$pop # Pop by Island/site or Region
+genind_seppop <- seppop(genind)
+```
+## Locus stats by region
+```{r}
+pop_summary <- map_dfr(
+  names(genind_seppop),
+  function(pop_name) {
+    g <- genind_seppop[[pop_name]]
+    summ <- summary(g)
+    maf <- minorAllele(g)
+    
+    tibble(
+      Broad_region = pop_name,
+      Locus = locNames(g),
+      n = summ$n,
+      Ho = summ$Hobs,
+      MAF = as.numeric(maf),
+      label = paste(pop_name," n=", summ$n, sep = "")
+    )
+  }
+)
+
+head(pop_summary)
+```
+### Boxplot of observed het and maf for panel loci by region
+```{r}
+color_pal <- c("#431801", "#783513","#b45f06","#eca255","#3a7380","#9ac9d0","#f9d5a9")
+
+pop_summary$Broad_region <- factor(pop_summary$Broad_region, levels = c("Haida Gwaii", "P. of Wales Is. & B.C.","southern Southeast", "middle Southeast", "northern Southeast", "Southcentral", "Kodiak"))
+pop_summary$label <- factor(pop_summary$label, levels = unique(pop_summary$label[order(pop_summary$Broad_region)]))
+
+library(scales)  # for label_number()
+
+# p1: Observed Heterozygosity
+p1 <- ggplot(pop_summary, aes(x = label, y = Ho, fill = Broad_region)) +
+  geom_boxplot(alpha = 0.9, color = "black") +  # 90% opacity, black outline
+  scale_fill_manual(values = color_pal, guide = "none") +  # apply palette to fill
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  scale_y_continuous(labels = label_number(accuracy = 0.01)) +
+  labs(
+    x = NULL,
+    y = "Observed Heterozygosity",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_blank(),
+    axis.title.y = element_text(size = 12)
+  )
+
+# p2: Minor Allele Frequency
+
+p2 <- ggplot(pop_summary, aes(x = label, y = MAF, fill = Broad_region)) +
+  geom_boxplot(alpha = 0.9, color = "black") +  # 90% opacity, black outline
+  scale_fill_manual(values = color_pal, guide = "none") +  # apply palette to fill
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  scale_y_continuous(labels = label_number(accuracy = 0.01)) +
+  labs(
+    x = "Region",
+    y = "Minor Allele Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.title.y = element_text(size = 12)
+  )
+```
+# Save boxplot
+```{r}
+png("figures/tissues_manuscript/SBTD_panel_het_maf_region_boxplots.png", width = 5000, height = 3000, res = 600)
+
+grid.arrange(p1, p2, ncol = 1, heights = c(1,1.6))
+
+dev.off()
+```
+### Number variable by region
+```{r}
+invar_summary_df <- pop_summary %>%
+  filter(MAF == 0) %>% # Invariable loci
+  group_by(Broad_region) %>%       # group by region
+  summarise(n_invar_loci = n()) %>%      # count number of loci
+  arrange(desc(n_invar_loci))           # sort by count
+
+invar_summary_df
+
+var_summary_df <- pop_summary %>%
+  filter(Ho > 0.2) %>%
+  filter(MAF > 0.2) %>% # Invariable loci
+  group_by(Broad_region) %>%       # group by region
+  summarise(n_loci = n()) %>%      # count number of loci
+  arrange(n_loci)           # sort by count
+
+var_summary_df
+
+left_join(var_summary_df, invar_summary_df)
+```
+# PID/PIDSib
+## Calculate PID and PIDsib by population/region
+Original simulation script from Dana Morin, modified for multiple regions/populations
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+# Parameters
+N <- 1000 # number of simulations
+x <- 40   # max number of loci to simulate through
+
+# Function to calculate PID and PIDsib for one population
+calc_pid <- function(genind_obj, popname, N, x) {
+  
+  # allele frequencies
+  freq <- makefreq(genind_obj) %>% as.data.frame()
+  df <- colMeans(freq, na.rm = TRUE) %>% as.data.frame()
+  row_names <- rownames(df)
+  
+  locus_names <- sub("^(([^:]+):[^:]+):.*$", "\\1", row_names)
+  
+  df$Marker <- locus_names
+  df$allele <- ifelse(grepl("\\.0$", row_names), "X1", "X2")
+  
+  allele_freqs <- pivot_wider(df, 
+                              id_cols = Marker,
+                              names_from = allele, 
+                              values_from = .)
+  
+  # format allele frequencies into list
+  freqs <- allele_freqs
+  al.freq.ls <- NULL
+  for (i in 1:length(freqs$Marker)) {
+    addon <- unname(unlist(c(freqs[i, -1])))
+    addon <- addon[!is.na(addon)]
+    addon <- list(addon)
+    al.freq.ls <- c(al.freq.ls, addon)
+  }
+  
+  # simulation
+  PID.pop.tbl <- matrix(NA, nrow = x, ncol = 2)
+  PID.pop.sib.tbl <- matrix(NA, nrow = x, ncol = 2)
+  
+  for (j in 1:x) { 
+    PIpop.loci <- NULL
+    PIpop.sib.loci <- NULL
+    
+    for (h in 1:N) {
+      samp <- sample(al.freq.ls, j, replace = FALSE)
+      PIpop <- NULL
+      PIpop.sib <- NULL
+      
+      for (i in 1:length(samp)) {
+        r1 <- sum(samp[[i]]^4)
+        r2 <- outer(X = samp[[i]], Y = samp[[i]], FUN = function(X,Y)(2*X*Y)^2)
+        r <- sum(r2[lower.tri(r2)]) + r1
+        s <- 0.25 + (0.5 * sum(samp[[i]]^2)) + (0.5 * sum(samp[[i]]^2)^2) -
+          (0.25 * sum(samp[[i]]^4))
+        
+        PIpop <- c(PIpop, r)
+        PIpop.sib <- c(PIpop.sib, s)
+      }
+      PIpop.loci <- c(PIpop.loci, prod(PIpop))
+      PIpop.sib.loci <- c(PIpop.sib.loci, prod(PIpop.sib))
+    }
+    
+    PID.pop.tbl[j, 1] <- j
+    PID.pop.tbl[j, 2] <- mean(PIpop.loci)
+    PID.pop.sib.tbl[j, 1] <- j
+    PID.pop.sib.tbl[j, 2] <- mean(PIpop.sib.loci)
+  }
+  
+  PID.pop.tbl <- as.data.frame(PID.pop.tbl)
+  colnames(PID.pop.tbl) <- c("Loci", "Avg.PID")
+  
+  PID.pop.sib.tbl <- as.data.frame(PID.pop.sib.tbl)
+  colnames(PID.pop.sib.tbl) <- c("Loci", "Avg.PIDsib")
+  
+  # merge PID and PIDsib, add population column
+  all_PID <- left_join(PID.pop.sib.tbl, PID.pop.tbl, by = "Loci") %>%
+    mutate(Population = popname)
+  
+  return(all_PID)
+}
+
+# ---- Run across all populations ----
+all_PID <- map2_dfr(genind_seppop, names(genind_seppop),
+                    ~calc_pid(.x, .y, N, x))
+
+# Final output
+head(all_PID)
+```
+# Plot PID and PIDsib
+```{r}
+pid_color_pal <- c("#431801", "#783513","#b45f06","#eca255","#3a7380","#9ac9d0","#f9d5a9")
+
+all_PID$Population <- factor(all_PID$Population, levels = c("Haida Gwaii", "P. of Wales Is. & B.C.","southern Southeast", "middle Southeast", "northern Southeast", "Southcentral", "Kodiak")) 
+
+
+p_PID <- ggplot(all_PID, aes(x = Loci, y = Avg.PID, color = Population)) +
+  geom_line(size = 1) +
+  geom_hline(aes(yintercept = 0.001, linetype = "PID = 0.001"), color = "black") +
+  scale_linetype_manual(
+    values = c("PID = 0.001" = "dashed")
+  ) +
+  scale_x_continuous(limits = c(0, 30)
+  ) +
+  coord_cartesian(ylim = c(0, 0.1)
+  ) +
+  scale_color_manual(values = pid_color_pal) +
+  labs(
+  #  title = "PID with Panel, Nsim = 1000",
+    x = "Number of Loci",
+    y = "Probability of Identity",
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p_PIDsib <- ggplot(all_PID, aes(x = Loci, y = Avg.PIDsib, color = Population)) +
+  geom_line(size = 1.5) +
+  geom_hline(aes(yintercept = 0.001, linetype = "PIDsib = 0.001"), color = "black") +
+  scale_linetype_manual(
+    values = c("PIDsib = 0.001" = "dashed")
+  ) +
+  scale_x_continuous(limits = c(0, 40)
+  ) +
+  coord_cartesian(ylim = c(0, 0.1)
+  ) +
+  scale_color_manual(values = pid_color_pal) +
+  labs(
+    #title = "PIDsib with Panel, Nsim = 1000",
+    x = "Number of Loci",
+    y = "Probability of Identity",
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_minimal(base_size = 14)
+```
+### Save plots
+```{r}
+png("figures/tissues_manuscript/SBTD_PIDsib.png", width = 5000, height = 3000, res = 600)
+
+p_PIDsib
+
+dev.off()
+
+png("figures/tissues_manuscript/SBTD_PID.png", width = 5000, height = 3000, res = 600)
+
+p_PID
+
+dev.off()
+```
+# List of variable loci by region
+```{r}
+# Assess if any loci are out of HWE
+HWE_SC <- data.frame(hw.test(genind_seppop$Southcentral)) 
+HWE_nSE <- data.frame(hw.test(genind_seppop$`northern Southeast`))
+HWE_HG <- data.frame(hw.test(genind_seppop$`Haida Gwaii`))
+HWE_KA <- data.frame(hw.test(genind_seppop$Kodiak))
+HWE_POW_BC <- data.frame(hw.test(genind_seppop$`P. of Wales Is. & B.C.`))
+HWE_mSE <- data.frame(hw.test(genind_seppop$`middle Southeast`))
+HWE_sSE <- data.frame(hw.test(genind_seppop$`middle Southeast`))
+
+# P adjust with Benjamini Hochberg FDR method
+HWE_SC_subset <- HWE_SC[p.adjust(HWE_SC$Pr.exact, method = "BH") < 0.05, ] # none out of HWE
+HWE_nSE_subset <- HWE_nSE[p.adjust(HWE_nSE$Pr.exact, method = "BH") < 0.05, ]
+HWE_HG_subset <- HWE_HG[p.adjust(HWE_HG$Pr.exact, method = "BH") < 0.05, ] # none out of HWE
+HWE_KA_subset <- HWE_KA[p.adjust(HWE_KA$Pr.exact, method = "BH") < 0.05, ]
+HWE_POW_BC_subset <- HWE_POW_BC[p.adjust(HWE_POW_BC$Pr.exact, method = "BH") < 0.05, ]  # none out of HWE
+HWE_mSE_subset <- HWE_mSE[p.adjust(HWE_mSE$Pr.exact, method = "BH") < 0.05, ]
+HWE_sSE_subset <- HWE_sSE[p.adjust(HWE_sSE$Pr.exact, method = "BH") < 0.05, ]
+
+HWE_nSE_subset$Region <- "nSE"
+HWE_KA_subset$Region <- "KA"
+HWE_mSE_subset$Region <- "mSE"
+HWE_sSE_subset$Region <- "sSE"
+
+HWE <- data.frame(Locus = c(rownames(HWE_nSE_subset), rownames(HWE_KA_subset), rownames(HWE_mSE_subset), rownames(HWE_sSE_subset)), info = c(HWE_nSE_subset$Region, HWE_KA_subset$Region, HWE_mSE_subset$Region, HWE_sSE_subset$Region))
+
+High_het <- pop_summary %>% filter(Ho > 0.7) %>% select(Locus) %>% unique()
+High_het$info <- "High_het"
+
+HWE_high_het <- rbind(HWE, High_het) %>% arrange(Locus)
+
+unique(HWE_high_het$Locus) # remove these from recommended loci
+
+var_loci_df <- pop_summary %>%
+  filter(Ho > 0.2) %>%
+  filter(MAF > 0.2) %>% # Invariable loci
+  group_by(Broad_region)      # group by region
+
+recommended <- var_loci_df %>% filter(!Locus %in% unique(HWE_high_het$Locus))
+```
+# Create recommended loci table
+```{r}
+F_R_seq <- read.csv("data/F_R_sequences.csv")
+F_R_seq$CHROM_POS <- paste(F_R_seq$CHROM,F_R_seq$POS, sep = "_")
+
+locus_info <- data.frame(vcfR_panel_filt@fix) %>% select(CHROM:ALT)
+
+rec_locus_info <- locus_info[locus_info$ID %in% unique(recommended$Locus), ]
+rec_locus_info$CHROM_POS <- paste(rec_locus_info$CHROM, rec_locus_info$POS, sep = "_")
+
+rec_F_R <- left_join(rec_locus_info, F_R_seq, by = "CHROM_POS")
+recommended_table <- left_join(recommended, rec_F_R, by = c("Locus"="ID")) %>% select(Broad_region:MAF,CHROM.x:ALT, Forward.sequence, Reverse.sequence)
+
+colnames(recommended_table) <- c("Broad Region", "Locus ID", "N Samples", "Observed Heterozygosity", "Minor Allele Frequency", "Chromosome", "Position", "Reference Allele", "Alternate Allele", "Forward Sequence", "Reverse Sequence")
+
+write.csv(recommended_table, file = "output/recommended_locus_set_by_region.csv")
+```
