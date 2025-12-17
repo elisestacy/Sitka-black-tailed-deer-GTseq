@@ -24,7 +24,7 @@ library(ggplot2)
 library(gridExtra)
 library(maps)
 ```
-## Load error calculation functions (code slightly modified from https://github.com/arianacerreta)
+## Load error calculation functions (code slightly modified from original by https://github.com/arianacerreta)
 ```{r}
 ## Scoring matching genotypes
 #make a function
