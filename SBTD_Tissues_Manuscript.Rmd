@@ -22,9 +22,14 @@ library(tidyr)
 # Plotting
 library(ggplot2)
 library(gridExtra)
-library(maps)
+
+# Maps
+library(ggspatial)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
 ```
-## Load error calculation functions (code slightly modified from original by https://github.com/arianacerreta)
+## Load error calculation functions (code slightly modified from https://github.com/arianacerreta)
 ```{r}
 ## Scoring matching genotypes
 #make a function
@@ -148,37 +153,30 @@ calculate_gt_pairs_errors <- function(paired_gt_df) {
 ```
 # Read in sample data
 ```{r}
-snps_vcfR <- read.vcfR("/mnt/ceph/estacy/SBTDeer/Tissue_samples/05_filter/populations_R0.5_mac2/populations.snps.vcf")
+snps_vcfR <- read.vcfR("/directory/path/SBTDeer/Tissue_samples/05_filter/populations_R0.5_mac2/populations.snps.vcf")
 
-locations <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Tissue_locations.csv", na.strings = c("","NA"))
-
-locations$Region[locations$Region == "Graham Island (Haida Gwaii)"] <- "Graham Island"
-
-# Just present broad regions - split regions to northern Southeast, mid Southeast, southern Southeast
-
-library(dplyr)
+locations <- read.csv("/directory/path/SBTDeer/R_analysis/data/Tissue_locations.csv", na.strings = c("","NA"))
 
 locations <- locations %>%
   mutate(
     Populations = case_when(
       Region %in% c("Gravina Island",
                     "Revillagigedo Island",
-                    "Cleveland Peninsula") ~ "southern Southeast",
-      Region %in% c("Kupreanof Island", "Mitkof Island") ~ "middle Southeast",
+                    "Cleveland Peninsula") ~ "SSEAK",
+      Region %in% c("Kupreanof Island", "Mitkof Island") ~ "CSEAK",
       Region == "Prince of Wales Island" ~ "P. of Wales Is.",
-      Broad_region == "northern Southeast" ~ "northern Southeast",
+      Broad_region == "northern Southeast" ~ "NSEAK",
       Broad_region == "Kodiak Archipelago" ~ "Kodiak",
-      Broad_region == "Southcentral" ~ "Southcentral",
-      Broad_region == "British Columbia" ~ "British Columbia",
+      Broad_region == "Southcentral" ~ "SCAK",
       Broad_region == "Haida Gwaii" ~ "Haida Gwaii",
-      Broad_region == NA ~ "Unknown"
+      TRUE ~ "Unknown"
     )
   )
 ```
 
 # Subset (whitelist) to designed panel loci
 ```{r}
-panel_snps <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
+panel_snps <- read.csv("/directory/path/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
 
 # Whitelist snps panel was designed for only
 panel_snps <- panel_snps %>%
@@ -314,14 +312,14 @@ sample_locations <- left_join(popmap_relabeled, locations, by = c("id"="UI.Barco
 
 popmap_relabeled$pop <- sample_locations$Populations
 
-popmap_relabeled$pop <- factor(popmap_relabeled$pop, levels = c("Kodiak", "Southcentral", "northern Southeast", "middle Southeast", "southern Southeast", "P. of Wales Is.","British Columbia", "Haida Gwaii", "Unknown"))
+popmap_relabeled$pop <- factor(popmap_relabeled$pop, levels = c("Kodiak", "SCAK", "NSEAK", "CSEAK", "SSEAK", "P. of Wales Is.", "Haida Gwaii", "Unknown"))
 
 colnames(vcfR_panel_filt@gt) <- c("FORMAT", popmap_relabeled$id)
 ```
 ## Map
 ### Format data to map
 ```{r}
-locations$Populations <- factor(locations$Populations, levels = c("Kodiak", "Southcentral", "northern Southeast", "middle Southeast", "southern Southeast", "P. of Wales Is.", "British Columbia", "Haida Gwaii", "Unknown"))
+locations$Populations <- factor(locations$Populations, levels = c("Kodiak", "SCAK", "NSEAK", "CSEAK", "SSEAK", "P. of Wales Is.", "Haida Gwaii", "Unknown"))
 
 # Sample size by location
 
@@ -342,47 +340,76 @@ populations_color_pal <- c("#f9d5a9","#b5dee4","#3a7380","#eca255","#b45f06","#8
 ```
 # Plot and save map of samples
 ```{r}
-# get world map data
-world_map_df <- map_data("world")
+world_sf <- ne_countries(
+  scale = "medium",
+  returnclass = "sf"
+)
 
-png("figures/tissues_manuscript/SBTD_sites_map.png", width = 6000, height = 6000, res = 600)
+locations_sf <- st_as_sf(
+  locations_clean,
+  coords = c("Lon", "Lat"),
+  crs = 4326
+)
+
+world_sf <- st_transform(world_sf, 3338)      # Alaska Albers
+locations_sf <- st_transform(locations_sf, 3338)
+
+bbox_ll <- st_bbox(
+  c(xmin = -156, ymin = 54.5, xmax = -125, ymax = 59.5),
+  crs = st_crs(4326)
+)
+
+bbox_proj <- st_transform(st_as_sfc(bbox_ll), 3338)
+
+png("figures/tissues_manuscript/SBTD_sites_map.png",
+    width = 6000, height = 6000, res = 600)
 
 ggplot() +
-  geom_polygon(data = world_map_df,
-               aes(x = long, y = lat, group = group),
-               fill = "grey98",
-               colour = "grey50") +
-  geom_point(data = locations_clean,
-             aes(x = Lon, y = Lat,
-                 fill = Populations),
-             size = 4, shape = 21, stroke = .2) +
+  geom_sf(data = world_sf,
+          fill = "grey98",
+          color = "grey50") +
+  geom_sf(data = locations_sf,
+          aes(fill = Populations),
+          size = 4,
+          shape = 21,
+          stroke = 0.2) +
   scale_fill_manual(
     values = populations_color_pal,
     labels = labels_vector,
     guide = guide_legend(ncol = 1)
   ) +
-  coord_quickmap(xlim = c(-155, -124), ylim = c(52.5, 62)) +
+  coord_sf(
+    crs = st_crs(3338),
+    xlim = c(st_bbox(bbox_proj)["xmin"], st_bbox(bbox_proj)["xmax"]),
+    ylim = c(st_bbox(bbox_proj)["ymin"], st_bbox(bbox_proj)["ymax"]),
+    expand = FALSE
+  ) +
+  annotation_scale(
+    location = "bl",
+    unit_category = "metric",
+    width_hint = 0.25,
+    text_cex = 0.9
+  ) +
+  annotation_north_arrow(
+    location = "tl",
+    which_north = "true",
+    style = north_arrow_orienteering
+  ) +
   theme_minimal() +
-  labs(x = "Longitude", y = "Latitude") +
+  labs(x = NULL, y = NULL) +
   theme(
     legend.position = "bottom",
     legend.box = "vertical",
     legend.title = element_blank(),
     legend.key.size = unit(0.1, "cm"),
     legend.text = element_text(size = 16),
-    axis.text = element_text(size = 16),
-    axis.title = element_text(size = 16)
+    axis.text = element_text(size = 16)
   )
 
 dev.off()
 ```
 # Plot region popout map
 ```{r}
-# Plot region map
-library(rnaturalearth)
-library(rnaturalearthdata)
-library(sf)
-
 # Get USA states
 states <- ne_states(country = "United States of America", returnclass = "sf")
 
@@ -404,21 +431,21 @@ regions_centroids <- regions_centroids %>%
     label_y = st_coordinates(geometry)[,2]
   )
 
-# Move BC label slightly up and to the right, remove NWT
+# Update label format and locations
 regions_centroids <- regions_centroids %>%
   mutate(
-    label_x = ifelse(name == "British Columbia", label_x - 2.15, label_x),
-    label_y = ifelse(name == "British Columbia", label_y + 3.75, label_y),
-    label_name = ifelse(name == "British Columbia", "British\nColumbia", name)
+    label_x = ifelse(name == "British Columbia", label_x - 7, label_x),
+    label_y = ifelse(name == "British Columbia", label_y - 4.5, label_y),    
+    label_x = ifelse(name == "Yukon", label_x - 1.5, label_x),
+    label_y = ifelse(name == "Yukon", label_y + .5, label_y),  
+    label_name = case_when(
+      name == "British Columbia" ~ "B.C.\nCAN",
+      name == "Yukon" ~ "Yukon\nCAN",
+      name == "Alaska" ~ "Alaska\nUSA",
+      TRUE ~ name
+    )
   ) %>%
-  filter(name != "Northwest Territories")  # <<< remove NWT label
-
-
-regions_centroids <- regions_centroids %>%
-  mutate(
-    label_name = ifelse(name == "British Columbia", "British\nColumbia", name)
-  )
-
+  filter(name != "Northwest Territories")
 
 png("figures/tissues_manuscript/region_map.png", width = 6000, height = 6000, res = 600)
 
@@ -434,7 +461,7 @@ ggplot() +
     fontface = "bold",
     color = "black"
   ) +
-  coord_sf(xlim = c(-168, -119), ylim = c(49, 71.5), expand = FALSE) +
+  coord_sf(xlim = c(-168.5, -123), ylim = c(48.25, 71), expand = FALSE) +
   theme_void() +  # <<< removes all background lines
   theme(
     text = element_text(size = 22)
@@ -452,12 +479,11 @@ pca <- assess_missing_data_pca(vcfR=vcfR_panel_filt, popmap = popmap_relabeled, 
 # Population order (controls legend order)
 pop_order <- c(
   "Kodiak",
-  "Southcentral",
-  "northern Southeast",
-  "middle Southeast",
-  "southern Southeast",
+  "SCAK",
+  "NSEAK",
+  "CSEAK",
+  "SSEAK",
   "P. of Wales Is.",
-  "British Columbia",
   "Haida Gwaii",
   "Unknown"
 )
@@ -478,12 +504,11 @@ pop_labels_pca <- setNames(
 # Shape palette (named)
 populations_shape_pal <- c(
   "Kodiak" = 21,
-  "Southcentral" = 22,
-  "northern Southeast" = 21,
-  "middle Southeast" = 24,
-  "southern Southeast" = 22,
+  "SCAK" = 22,
+  "NSEAK" = 21,
+  "CSEAK" = 24,
+  "SSEAK" = 22,
   "P. of Wales Is." = 23,
-  "British Columbia" = 25,
   "Haida Gwaii" = 21,
   "Unknown" = 23
 )
@@ -491,31 +516,30 @@ populations_shape_pal <- c(
 # Color palette (named)
 populations_color_pal_pca <- c(
   "Kodiak" = "#f9d5a9",
-  "Southcentral" = "#b5dee4",
-  "northern Southeast" = "#3a7380",
-  "middle Southeast" = "#eca255",
-  "southern Southeast" = "#b45f06",
+  "SCAK" = "#b5dee4",
+  "NSEAK" = "#3a7380",
+  "CSEAK" = "#eca255",
+  "SSEAK" = "#b45f06",
   "P. of Wales Is." = "#863e19",
-  "British Columbia" = "#682502",
   "Haida Gwaii" = "#431801",
   "Unknown" = "grey"
 )
 ```
 # Plot and save PCAs
 ```{r}
-png("figures/tissues_manuscript/SBTD_pca.png", width = 6000, height = 6000, res = 600)
+png("figures/tissues_manuscript/SBTD_pca.png", width = 4500, height = 6000, res = 600)
 
 ggplot() +
   # All populations except BC & Unknown
   geom_point(
-    data = subset(pca, !pop %in% c("British Columbia", "Unknown")),
+    data = subset(pca, !pop %in% c("Unknown")),
     aes(x = PC1, y = PC2, fill = pop, shape = pop),
     size = 10, stroke = 0.5, alpha = 0.9
   ) +
 
   # BC & Unknown plotted on top
   geom_point(
-    data = subset(pca, pop %in% c("British Columbia", "Unknown")),
+    data = subset(pca, pop %in% c("Unknown")),
     aes(x = PC1, y = PC2, fill = pop, shape = pop),
     size = 10, stroke = 0.5, alpha = 0.9
   ) +
@@ -549,57 +573,8 @@ ggplot() +
   ) +
 
   labs(
-    x = "PC1 12.91% variance explained",
-    y = "PC2 5.29% variance explained"
-  )
-
-dev.off()
-
-png("figures/tissues_manuscript/SBTD_pca_2_3.png", width = 6000, height = 6000, res = 600)
-
-ggplot() +
-  # 1. Plot all populations except Unknown
-  geom_point(
-    data = subset(pca, pop != "Unknown"),
-    aes(x = PC2, y = PC3, fill = pop, shape = pop),
-    size = 7, stroke = 0.5, alpha = 0.9
-  ) +
-
-  # 2. Plot Unknown samples on top
-  geom_point(
-    data = subset(pca, pop == "Unknown"),
-    aes(x = PC1, y = PC2, fill = pop, shape = pop),
-    size = 7, stroke = 0.5, alpha = 0.9
-  ) +
-
-  scale_fill_manual(
-    values = populations_color_pal,
-    labels = pop_labels_pca
-  ) +
-
-  # Add shape scaling
-  scale_shape_manual(
-    values = populations_shape_pal,    # <-- You must define this vector
-    labels = pop_labels_pca
-  ) +
-
-  theme_light() +
-  guides(
-    fill = guide_legend(order = 1, ncol = 3),
-    shape = guide_legend(order = 1, ncol = 3)
-  ) +
-  theme(
-    legend.position = "bottom",
-    legend.box = "vertical",
-    legend.title = element_blank(),
-    legend.key.size = unit(0.1, "cm"),
-    legend.text = element_text(size = 16),
-    axis.text = element_text(size = 14),
-    axis.title = element_text(size = 16)
-  #) +
-  #labs(
-  #  x = "PC1 XX% variance explained",
-  #  y = "PC2 XX% variance explained"
+    x = "PC1 12.91% Variance Explained",
+    y = "PC2 5.29% Variance Explained"
   )
 
 dev.off()
@@ -608,17 +583,40 @@ dev.off()
 ```{r}
 png("figures/tissues_manuscript/SBTD_pca_missing_region.png", width = 6000, height = 3000, res = 600)
 
-ggplot(data = pca, aes(x = PC1, y = PC2, color = pop, fill = missing)) +
+ggplot() +
+  # All populations except Unknown
+  geom_point(
+    data = subset(pca, !pop %in% c("Unknown")),
+    aes(x = PC1, y = PC2,
+        fill  = missing,
+        color = pop),
+    size = 5,
+    shape = 21,     # <-- critical
+    stroke = 1.5,
+    alpha = 0.9
+  ) +
+  # Unknown plotted on top
+  geom_point(
+    data = subset(pca, pop %in% c("Unknown")),
+    aes(x = PC1, y = PC2,
+        fill  = missing,
+        color = pop),
+    size = 5,
+    shape = 21,     # <-- critical
+    stroke = 1.5,
+    alpha = 0.9
+  ) +
   scale_color_manual(
-    values = populations_color_pal,
-    labels = pop_labels_pca) +
+    values = populations_color_pal_pca,
+    labels = pop_labels_pca,
+    name   = "Population"
+  ) +
   scale_fill_gradient(
-  low = "lightgrey",
-  high = "black"
-) +
-  geom_point(size = 4, stroke = 1, shape = 21, alpha = 0.9) +
-  theme_light() +
-  theme()
+    low  = "lightgrey",
+    high = "black",
+    name = "Missing data"
+  ) +
+  theme_light()
 
 dev.off()
 ```
@@ -653,9 +651,9 @@ gt_split <- ext.gt %>%
 # Format one input file per population - running relatedness by population/region
 gt_pop <- left_join(popmap_relabeled, gt_split, by = c("id" = "ID"))
 
-gt_nSE <- gt_pop %>% filter(pop == "northern Southeast" | pop == "Unknown") %>% select(!pop)
-gt_SC <- gt_pop %>% filter(pop == "Southcentral") %>% select(!pop)
-gt_SE <- gt_pop %>% filter(pop == "middle Southeast" | pop == "southern Southeast" | pop == "British Columbia") %>% select(!pop)
+gt_nSE <- gt_pop %>% filter(pop == "NSEAK" | pop == "Unknown") %>% select(!pop)
+gt_SC <- gt_pop %>% filter(pop == "SCAK") %>% select(!pop)
+gt_SE <- gt_pop %>% filter(pop == "CSEAK" | pop == "SSEAK") %>% select(!pop)
 gt_KA <- gt_pop %>% filter(pop == "Kodiak Archipelago") %>% select(!pop)
 gt_HG <- gt_pop %>% filter(pop == "Haida Gwaii Archipelago") %>% select(!pop)
 
@@ -694,7 +692,7 @@ Admixture script: run_admixture.sh and python wrapper (cite)
 ```{r}
 vcfR_panel_filt_rel <- vcfR_panel_filt[, !colnames(vcfR_panel_filt@gt) %in% remove]
 
-vcfR::write.vcf(vcfR_panel_filt_rel, "data/vcfR_panel_filt_rel.vcf.gz") # Test filt/shared loci
+vcfR::write.vcf(vcfR_panel_filt_rel, "data/vcfR_panel_filt_rel.vcf.gz") # Use to run Admixture
 ```
 ## Admixture
 #### CV error
@@ -736,9 +734,7 @@ popmap_rel <- left_join(popmap_rel, sites)
 
 rownames(alist[[1]]) <- popmap_rel$id
 
-labels <-  data.frame(site = as.character(popmap_rel$site), pop = as.character(popmap_rel$pop))
-
-labels[labels == "British Columbia"] <- "B.C."
+labels <-  data.frame(pop = as.character(popmap_rel$pop))
 ```
 ## View barplots K = 2 through 6
 ```{r}
@@ -751,6 +747,7 @@ rownames(qlist$related_removed.4.1.Q) <- paste(labels$pop, rownames(qlist$relate
 rownames(qlist$related_removed.5.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.5.1.Q))
 rownames(qlist$related_removed.6.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.6.1.Q))
 
+# Rearrange cluster order for plot color consistency
 qlist$related_removed.4.1.Q <- data.frame("Cluster1" = qlist$related_removed.4.1.Q$Cluster3, "Cluster2" = qlist$related_removed.4.1.Q$Cluster2, "Cluster3" = qlist$related_removed.4.1.Q$Cluster4, "Cluster4" = qlist$related_removed.4.1.Q$Cluster1)
 
 qlist$related_removed.5.1.Q <- data.frame("Cluster1" = qlist$related_removed.5.1.Q$Cluster1, "Cluster2" = qlist$related_removed.5.1.Q$Cluster4, "Cluster3" = qlist$related_removed.5.1.Q$Cluster5, "Cluster4" = qlist$related_removed.5.1.Q$Cluster2, "Cluster5" = qlist$related_removed.5.1.Q$Cluster3)
@@ -774,16 +771,25 @@ p <- plotQ(
   exportplot = FALSE,
   basesize = 10,
   grplab = labels,
+  splabcol = "black",
   ordergrp = TRUE,
-  subsetgrp = c("Sitkalidak Island", "Uganik Island", "Kodiak Island", "Whale Island", "Afognak Island", "Hinchinbrook Island", "Hawkins Island", "Shelter Island", "Mainland Juneau", "Douglas Island", "Admiralty Island", "Chichagof Island", "Baranof Island", "Krestof Island", "Partofshikof Island", "Kruzof Island", "Unknown", "Mitkof Island", "Kupreanof Island", "Cleveland Peninsula", "Revillagigedo Island", "Gravina Island", "Prince of Wales Island", "B.C.", "Graham Island"),
-  grplabangle = 0,
-  grplabsize = 4,
+  subsetgrp = c("Kodiak",
+  "SCAK",
+  "NSEAK",
+  "Unknown",
+  "CSEAK",
+  "SSEAK",
+  "P. of Wales Is.",
+  "Haida Gwaii"),
+  grplabangle = 20,
+  grplabsize = 5.5,
+  grplabcol = "black",
   linesize = 0,
-  pointsize = 10,
-  grplabpos = 0.5,
-  grplabspacer = 0.5,
-  grplabjust = 0.5,
-  grplabheight = 30,
+  pointsize = 0,
+  grplabpos = 0.9,
+  grplabspacer = 0,
+  grplabjust = 1,
+  grplabheight = 15,
   splabsize = 28,
   divgrp = "pop",
   divsize = 1,
@@ -791,7 +797,7 @@ p <- plotQ(
   clustercol = my_colors   # <--- custom color palette here
 )
 
-#c("Kodiak", "Southcentral", "northern Southeast", "Unknown", "middle Southeast", "southern Southeast", "B.C.", "Haida Gwaii")
+#c("Kodiak", "SCAK", "NSEAK", "Unknown", "CSEAK", "SSEAK", "B.C.", "Haida Gwaii")
 png("figures/tissues_manuscript/SBTD_admixture.png", width = 6000, height = 6000, res = 600)
 grid.arrange(p$plot[[1]])
 dev.off()
@@ -801,9 +807,7 @@ dev.off()
 ```{r}
 popmap_var <- data.frame(id = popmap_relabeled$id, pop = as.character(popmap_relabeled$pop))
 ## Combine BC with SE since low sample size and groups as a population, put NA samples in the  SE/BC group
-popmap_var$pop[popmap_var$pop == "British Columbia"] <- "P. of Wales Is. & B.C."
-popmap_var$pop[popmap_var$pop == "P. of Wales Is."] <- "P. of Wales Is. & B.C."
-popmap_var$pop[popmap_var$pop == "Unknown"] <- "northern Southeast"
+popmap_var$pop[popmap_var$pop == "Unknown"] <- "NSEAK"
 
 genind <- vcfR2genind(vcfR_panel_filt)
 pop(genind) <- popmap_var$pop # Pop by Island/site or Region
@@ -833,9 +837,9 @@ head(pop_summary)
 ```
 ### Boxplot of observed het and maf for panel loci by region
 ```{r}
-color_pal <- c("#431801", "#783513","#b45f06","#eca255","#3a7380","#9ac9d0","#f9d5a9")
+color_pal <- c("#f9d5a9", "#9ac9d0", "#3a7380", "#eca255", "#b45f06", "#783513", "#431801")
 
-pop_summary$Broad_region <- factor(pop_summary$Broad_region, levels = c("Haida Gwaii", "P. of Wales Is. & B.C.","southern Southeast", "middle Southeast", "northern Southeast", "Southcentral", "Kodiak"))
+pop_summary$Broad_region <- factor(pop_summary$Broad_region, levels = c("Kodiak", "SCAK", "NSEAK", "CSEAK", "SSEAK", "P. of Wales Is.", "Haida Gwaii"))
 pop_summary$label <- factor(pop_summary$label, levels = unique(pop_summary$label[order(pop_summary$Broad_region)]))
 
 library(scales)  # for label_number()
@@ -844,7 +848,9 @@ library(scales)  # for label_number()
 p1 <- ggplot(pop_summary, aes(x = label, y = Ho, fill = Broad_region)) +
   geom_boxplot(alpha = 0.9, color = "black") +  # 90% opacity, black outline
   scale_fill_manual(values = color_pal, guide = "none") +  # apply palette to fill
-  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  scale_x_discrete(
+  labels = function(x) sub("\\s+n=", "\nn=", x)
+) +
   scale_y_continuous(labels = label_number(accuracy = 0.01)) +
   labs(
     x = NULL,
@@ -863,7 +869,9 @@ p1 <- ggplot(pop_summary, aes(x = label, y = Ho, fill = Broad_region)) +
 p2 <- ggplot(pop_summary, aes(x = label, y = MAF, fill = Broad_region)) +
   geom_boxplot(alpha = 0.9, color = "black") +  # 90% opacity, black outline
   scale_fill_manual(values = color_pal, guide = "none") +  # apply palette to fill
-  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  scale_x_discrete(
+  labels = function(x) sub("\\s+n=", "\nn=", x)
+) +
   scale_y_continuous(labels = label_number(accuracy = 0.01)) +
   labs(
     x = "Region",
@@ -999,9 +1007,9 @@ head(all_PID)
 ```
 # Plot PID and PIDsib
 ```{r}
-pid_color_pal <- c("#431801", "#783513","#b45f06","#eca255","#3a7380","#9ac9d0","#f9d5a9")
+pid_color_pal <- rev(c("#431801", "#783513","#b45f06","#eca255","#3a7380","#9ac9d0","#f9d5a9"))
 
-all_PID$Population <- factor(all_PID$Population, levels = c("Haida Gwaii", "P. of Wales Is. & B.C.","southern Southeast", "middle Southeast", "northern Southeast", "Southcentral", "Kodiak")) 
+all_PID$Population <- factor(all_PID$Population, levels = rev(c("Haida Gwaii", "P. of Wales Is.","SSEAK", "CSEAK", "NSEAK", "SCAK", "Kodiak"))) 
 
 
 p_PID <- ggplot(all_PID, aes(x = Loci, y = Avg.PID, color = Population)) +
@@ -1010,7 +1018,7 @@ p_PID <- ggplot(all_PID, aes(x = Loci, y = Avg.PID, color = Population)) +
   scale_linetype_manual(
     values = c("PID = 0.001" = "dashed")
   ) +
-  scale_x_continuous(limits = c(0, 30)
+  scale_x_continuous(limits = c(0, 20)
   ) +
   coord_cartesian(ylim = c(0, 0.1)
   ) +
@@ -1022,22 +1030,22 @@ p_PID <- ggplot(all_PID, aes(x = Loci, y = Avg.PID, color = Population)) +
     color = NULL,
     linetype = NULL
   ) +
-  theme_minimal() +
-  theme(legend.position = "none")
+  theme_minimal()
 
 p_PIDsib <- ggplot(all_PID, aes(x = Loci, y = Avg.PIDsib, color = Population)) +
   geom_line(size = 1.5) +
-  geom_hline(aes(yintercept = 0.001, linetype = "PIDsib = 0.001"), color = "black") +
+  geom_hline(
+    aes(yintercept = 0.001, linetype = "pid_sibs"),
+    color = "black"
+  ) +
   scale_linetype_manual(
-    values = c("PIDsib = 0.001" = "dashed")
+    values = c(pid_sibs = "dashed"),
+    labels = c(expression(PID[SIBS] == 0.001))
   ) +
-  scale_x_continuous(limits = c(0, 40)
-  ) +
-  coord_cartesian(ylim = c(0, 0.1)
-  ) +
+  scale_x_continuous(limits = c(0, 40)) +
+  coord_cartesian(ylim = c(0, 0.1)) +
   scale_color_manual(values = pid_color_pal) +
   labs(
-    #title = "PIDsib with Panel, Nsim = 1000",
     x = "Number of Loci",
     y = "Probability of Identity",
     color = NULL,
@@ -1062,20 +1070,20 @@ dev.off()
 # List of variable loci by region
 ```{r}
 # Assess if any loci are out of HWE
-HWE_SC <- data.frame(hw.test(genind_seppop$Southcentral)) 
-HWE_nSE <- data.frame(hw.test(genind_seppop$`northern Southeast`))
+HWE_SC <- data.frame(hw.test(genind_seppop$SCAK)) 
+HWE_nSE <- data.frame(hw.test(genind_seppop$`NSEAK`))
 HWE_HG <- data.frame(hw.test(genind_seppop$`Haida Gwaii`))
 HWE_KA <- data.frame(hw.test(genind_seppop$Kodiak))
-HWE_POW_BC <- data.frame(hw.test(genind_seppop$`P. of Wales Is. & B.C.`))
-HWE_mSE <- data.frame(hw.test(genind_seppop$`middle Southeast`))
-HWE_sSE <- data.frame(hw.test(genind_seppop$`middle Southeast`))
+HWE_POW <- data.frame(hw.test(genind_seppop$`P. of Wales Is.`))
+HWE_mSE <- data.frame(hw.test(genind_seppop$`CSEAK`))
+HWE_sSE <- data.frame(hw.test(genind_seppop$`CSEAK`))
 
 # P adjust with Benjamini Hochberg FDR method
 HWE_SC_subset <- HWE_SC[p.adjust(HWE_SC$Pr.exact, method = "BH") < 0.05, ] # none out of HWE
 HWE_nSE_subset <- HWE_nSE[p.adjust(HWE_nSE$Pr.exact, method = "BH") < 0.05, ]
 HWE_HG_subset <- HWE_HG[p.adjust(HWE_HG$Pr.exact, method = "BH") < 0.05, ] # none out of HWE
 HWE_KA_subset <- HWE_KA[p.adjust(HWE_KA$Pr.exact, method = "BH") < 0.05, ]
-HWE_POW_BC_subset <- HWE_POW_BC[p.adjust(HWE_POW_BC$Pr.exact, method = "BH") < 0.05, ]  # none out of HWE
+HWE_POW_subset <- HWE_POW_BC[p.adjust(HWE_POW$Pr.exact, method = "BH") < 0.05, ]  # none out of HWE
 HWE_mSE_subset <- HWE_mSE[p.adjust(HWE_mSE$Pr.exact, method = "BH") < 0.05, ]
 HWE_sSE_subset <- HWE_sSE[p.adjust(HWE_sSE$Pr.exact, method = "BH") < 0.05, ]
 
