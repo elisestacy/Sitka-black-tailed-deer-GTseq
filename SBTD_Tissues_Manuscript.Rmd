@@ -18,6 +18,7 @@ library(stringr)
 library(purrr)
 library(dplyr)
 library(tidyr)
+library(tibble)
 
 # Plotting
 library(ggplot2)
@@ -153,9 +154,9 @@ calculate_gt_pairs_errors <- function(paired_gt_df) {
 ```
 # Read in sample data
 ```{r}
-snps_vcfR <- read.vcfR("/directory/path/SBTDeer/Tissue_samples/05_filter/populations_R0.5_mac2/populations.snps.vcf")
+snps_vcfR <- read.vcfR("/mnt/ceph/estacy/SBTDeer/Tissue_samples/05_filter/populations_R0.5_mac2/populations.snps.vcf")
 
-locations <- read.csv("/directory/path/SBTDeer/R_analysis/data/Tissue_locations.csv", na.strings = c("","NA"))
+locations <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Tissue_locations.csv", na.strings = c("","NA"))
 
 locations <- locations %>%
   mutate(
@@ -176,7 +177,7 @@ locations <- locations %>%
 
 # Subset (whitelist) to designed panel loci
 ```{r}
-panel_snps <- read.csv("/directory/path/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
+panel_snps <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
 
 # Whitelist snps panel was designed for only
 panel_snps <- panel_snps %>%
@@ -240,15 +241,18 @@ pair_err_summ <- pair_errors %>% # Summarize mismatch data
     Avg_Missing = round(mean(Missing_Full, na.rm = TRUE), 1)
   )
 
-png("figures/tissues_manuscript/Supp_error_rates.png", width = 6000, height = 6000, res = 600)
+png("figures/tissues_manuscript/Supp_error_rates.png", width = 3000, height = 2000, res = 600)
 # Plot error rates
 ggplot(pair_err_summ, aes(x=Missing, y = Depth, fill = Avg_Mismatch)) +
   geom_tile() +
   scale_fill_gradient2(low = "lightblue", mid ="purple", high = "red", midpoint = 0.0025) +
   geom_text(aes(label = N_Samples), color = "black", size = 3) +
-  labs(title = "Sample replicate pairs retained and average mismatch", subtitle = "Across Missingness filtering") +
+  labs(title = "Replicate Tissue Retained and Average mismatch", subtitle = "Across missingness and depth filtering") +
+  ylab("Minimum Genotype Depth") +
   xlab("Sample Missingness")
 dev.off()
+
+pair_errors %>% filter(Depth == 10 & Missing == 0.4) %>% arrange(desc(Mismatch_Rate))
 ```
 # Select one replicate per lab_id with the lowest missing_data and highest depth
 ```{r}
@@ -408,6 +412,9 @@ ggplot() +
 
 dev.off()
 ```
+
+
+
 # Plot region popout map
 ```{r}
 # Get USA states
@@ -654,8 +661,8 @@ gt_pop <- left_join(popmap_relabeled, gt_split, by = c("id" = "ID"))
 gt_nSE <- gt_pop %>% filter(pop == "NSEAK" | pop == "Unknown") %>% select(!pop)
 gt_SC <- gt_pop %>% filter(pop == "SCAK") %>% select(!pop)
 gt_SE <- gt_pop %>% filter(pop == "CSEAK" | pop == "SSEAK") %>% select(!pop)
-gt_KA <- gt_pop %>% filter(pop == "Kodiak Archipelago") %>% select(!pop)
-gt_HG <- gt_pop %>% filter(pop == "Haida Gwaii Archipelago") %>% select(!pop)
+gt_KA <- gt_pop %>% filter(pop == "Kodiak") %>% select(!pop)
+gt_HG <- gt_pop %>% filter(pop == "Haida Gwaii") %>% select(!pop)
 
 input_nSE <- readgenotypedata(gt_nSE)
 input_SC <- readgenotypedata(gt_SC)
@@ -747,7 +754,6 @@ rownames(qlist$related_removed.4.1.Q) <- paste(labels$pop, rownames(qlist$relate
 rownames(qlist$related_removed.5.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.5.1.Q))
 rownames(qlist$related_removed.6.1.Q) <- paste(labels$pop, rownames(qlist$related_removed.6.1.Q))
 
-# Rearrange cluster order for plot color consistency
 qlist$related_removed.4.1.Q <- data.frame("Cluster1" = qlist$related_removed.4.1.Q$Cluster3, "Cluster2" = qlist$related_removed.4.1.Q$Cluster2, "Cluster3" = qlist$related_removed.4.1.Q$Cluster4, "Cluster4" = qlist$related_removed.4.1.Q$Cluster1)
 
 qlist$related_removed.5.1.Q <- data.frame("Cluster1" = qlist$related_removed.5.1.Q$Cluster1, "Cluster2" = qlist$related_removed.5.1.Q$Cluster4, "Cluster3" = qlist$related_removed.5.1.Q$Cluster5, "Cluster4" = qlist$related_removed.5.1.Q$Cluster2, "Cluster5" = qlist$related_removed.5.1.Q$Cluster3)
@@ -809,6 +815,9 @@ popmap_var <- data.frame(id = popmap_relabeled$id, pop = as.character(popmap_rel
 ## Combine BC with SE since low sample size and groups as a population, put NA samples in the  SE/BC group
 popmap_var$pop[popmap_var$pop == "Unknown"] <- "NSEAK"
 
+popmap_var <- left_join(popmap_var, locations, by = c("id"="UI.Barcode")) %>% select(id, pop, Region)
+popmap_var$Region[is.na(popmap_var$Region)] <- "NSEAK"
+
 genind <- vcfR2genind(vcfR_panel_filt)
 pop(genind) <- popmap_var$pop # Pop by Island/site or Region
 genind_seppop <- seppop(genind)
@@ -834,6 +843,24 @@ pop_summary <- map_dfr(
 )
 
 head(pop_summary)
+
+pop_summary$Broad_region <- factor(pop_summary$Broad_region, levels = c("Kodiak", "SCAK", "NSEAK", "CSEAK", "SSEAK", "P. of Wales Is.", "Haida Gwaii"))
+pop_summary$label <- factor(pop_summary$label, levels = unique(pop_summary$label[order(pop_summary$Broad_region)]))
+
+pop_summary %>% 
+  group_by(label) %>% 
+  summarise(invar = sum(MAF <= 0),
+            mean_MAF = mean(MAF) %>% round(digits = 2),
+            sd_MAF = sd(MAF) %>% round(digits = 2),
+            mean_Ho = mean(Ho) %>% round(digits = 2),
+            sd_Ho = sd(Ho) %>% round(digits = 2))
+
+popmap_var$pop <- factor(popmap_var$pop, levels = c("Kodiak", "SCAK", "NSEAK", "CSEAK", "SSEAK", "P. of Wales Is.", "Haida Gwaii"))
+
+# Sample size by broad region/pop
+popmap_var %>% 
+  group_by(Region, pop) %>% 
+  summarise(n = n()) %>% arrange(pop)
 ```
 ### Boxplot of observed het and maf for panel loci by region
 ```{r}
@@ -1003,7 +1030,18 @@ all_PID <- map2_dfr(genind_seppop, names(genind_seppop),
                     ~calc_pid(.x, .y, N, x))
 
 # Final output
-head(all_PID)
+library(dplyr)
+
+all_PID$Population <- factor(all_PID$Population, levels = rev(c("Haida Gwaii", "P. of Wales Is.","SSEAK", "CSEAK", "NSEAK", "SCAK", "Kodiak"))) 
+
+all_PID %>%
+  group_by(Population) %>%
+  filter(Avg.PIDsib < 0.001) %>%
+  slice(1) %>%
+  select(Population, Loci) %>%
+  mutate(label = paste0(Population, " = ", Loci)) %>%
+  pull(label) %>%
+  paste(collapse = ", ")
 ```
 # Plot PID and PIDsib
 ```{r}
@@ -1083,7 +1121,7 @@ HWE_SC_subset <- HWE_SC[p.adjust(HWE_SC$Pr.exact, method = "BH") < 0.05, ] # non
 HWE_nSE_subset <- HWE_nSE[p.adjust(HWE_nSE$Pr.exact, method = "BH") < 0.05, ]
 HWE_HG_subset <- HWE_HG[p.adjust(HWE_HG$Pr.exact, method = "BH") < 0.05, ] # none out of HWE
 HWE_KA_subset <- HWE_KA[p.adjust(HWE_KA$Pr.exact, method = "BH") < 0.05, ]
-HWE_POW_subset <- HWE_POW_BC[p.adjust(HWE_POW$Pr.exact, method = "BH") < 0.05, ]  # none out of HWE
+HWE_POW_subset <- HWE_POW[p.adjust(HWE_POW$Pr.exact, method = "BH") < 0.05, ]  # none out of HWE
 HWE_mSE_subset <- HWE_mSE[p.adjust(HWE_mSE$Pr.exact, method = "BH") < 0.05, ]
 HWE_sSE_subset <- HWE_sSE[p.adjust(HWE_sSE$Pr.exact, method = "BH") < 0.05, ]
 
@@ -1124,4 +1162,518 @@ recommended_table <- left_join(recommended, rec_F_R, by = c("Locus"="ID")) %>% s
 colnames(recommended_table) <- c("Broad Region", "Locus ID", "N Samples", "Observed Heterozygosity", "Minor Allele Frequency", "Chromosome", "Position", "Reference Allele", "Alternate Allele", "Forward Sequence", "Reverse Sequence")
 
 write.csv(recommended_table, file = "output/recommended_locus_set_by_region.csv")
+```
+
+# Fecal Opt matching test
+```{r}
+vcfR_f_opt <- read.vcfR("../Fecal_samples/Fecal_Opt_1/Populations_Runs/Populations_EDeer_R50_mac3/populations.snps.vcf")
+
+panel_snps <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
+
+# Whitelist snps panel was designed for only
+panel_snps <- panel_snps %>%
+  separate(V1, into = c("CHROM", "POS"), sep = "_")
+
+# Create combined keys
+vcf_keys <- paste(vcfR_f_opt@fix[, "CHROM"], vcfR_f_opt@fix[, "POS"], sep = "_")
+panel_keys <- paste(panel_snps$CHROM, panel_snps$POS, sep = "_")
+
+# Filter based on matching keys
+vcfR_f_opt_panel <- vcfR_f_opt[vcf_keys %in% panel_keys, ]
+```
+```{r}
+sample_data <- read.csv("data/SBTD-ED Metadata 2018-2025.csv")
+vcfR_f_opt_panel
+
+vcfR_f_opt_dp <- hard_filter(vcfR_f_opt_panel, depth = 5, gq = 30)
+
+vcfR_f_opt_miss <- missing_by_sample(vcfR_f_opt_dp, cutoff = 0.8)
+
+vcfR_f_opt_miss_snp <- missing_by_snp(vcfR_f_opt_miss, cutoff = 0.1)
+
+fecal_opt_samples <- data.frame(Lab.ID = sub(".*_","", colnames(vcfR_f_opt_miss@gt[,2:85])) %>% unique())
+
+left_join(fecal_opt_samples, sample_data)
+
+data.frame(t(extract.gt(vcfR_f_opt_miss, element = "GT")))
+```
+```{r}
+popmap_fecal <- data.frame(id = colnames(vcfR_f_opt_miss_snp@gt[,2:85]))
+
+# Format paired genotype data frame
+paired_gt_df_fecal <- format_paired_gt_df(vcfR_f_opt_miss_snp, popmap_fecal)
+    
+# Calculate error rate
+error_rate_fecal <- calculate_gt_pairs_errors(paired_gt_df_fecal)
+
+hist(error_rate_fecal$summary_by_pair$Mismatch_Rate, breaks = 10, main = "Fecal DNA Replicate Mismatch Rate", xlab = "Mismatch Rate")
+
+mean(error_rate_fecal$summary_by_pair$Mismatch_Rate)
+```
+## Create consensus genotyes
+```{r}
+fecal_popmap <- data.frame(id = sub(
+  "Gtseq_\\d+_([A-Z]\\d+)_SBTD_((?:FOPT|FP)\\d+)_([A-Za-z0-9]+)",
+  "\\3_\\2_\\1",
+  popmap_fecal$id,
+  ignore.case = TRUE,
+  perl = TRUE
+))
+
+colnames(vcfR_f_opt_miss_snp@gt) <- c("FORMAT", fecal_popmap$id) # Re-label vcfR
+
+vcfR <- vcfR_f_opt_miss_snp
+
+# Extract genotypes
+rep_GTs <- data.frame(locus_id = rownames(extract.gt(vcfR, element = "GT")),
+                      extract.gt(vcfR, element = "GT"),
+                      row.names = NULL, check.names = F)
+
+# Extract depths
+rep_DPs <- data.frame(locus_id = rownames(extract.gt(vcfR, element = "DP")),
+                      extract.gt(vcfR, element = "DP"),
+                      row.names = NULL, check.names = F)
+rep_DPs[2:ncol(rep_DPs)] <- lapply(rep_DPs[2:ncol(rep_DPs)], as.numeric)
+
+# Transpose: rows = samples, columns = loci, first column = sample IDs
+transpose_gt <- function(df) {
+  locus_ids <- df[[1]]
+  mat <- t(df[, -1, drop = FALSE])
+  result <- data.frame(sample_id = rownames(mat), mat, row.names = NULL, check.names = FALSE)
+  colnames(result)[-1] <- locus_ids
+  result
+}
+
+rep_GTs_t <- transpose_gt(rep_GTs)
+rep_DPs_t <- transpose_gt(rep_DPs)
+
+results <- consensus_genotypes(rep_GTs_t, rep_DPs_t)
+consensus_gt_df    <- results$genotypes
+consensus_depth_df <- results$depths
+```
+# Run matching method
+### Format for matching code
+```{r}
+geno_matrix <- convert_gt_to_numeric(consensus_gt_df)
+
+consensus_gt_df %>% 
+  group_by(sample_id) %>%
+  summarise(na_count = rowSums(across(everything(), ~ is.na(.))),
+            prop_miss = na_count/217) %>% arrange(desc(na_count))
+
+pairs <- c("KYZXG", "KYZY5")
+count_allele_mismatches(pairs, geno_matrix)
+```
+### Function to compute allele frequencies and compute
+```{r}
+compute_allele_freq <- function(geno_matrix) {
+  
+  L <- ncol(geno_matrix) # number of loci
+  p <- numeric(L)
+  
+  for (j in seq_len(L)) {
+    
+    g <- geno_matrix[, j]
+    g <- g[!is.na(g)]
+    
+    if (length(g) == 0) {
+      p[j] <- NA
+      next
+    }
+    
+    nAA <- sum(g == 1L)
+    nAB <- sum(g == 2L)
+    n   <- length(g)
+    
+    p[j] <- (2*nAA + nAB) / (2*n)
+  }
+  
+  return(p)
+}
+
+allele_freq <- compute_allele_freq(geno_matrix)
+```
+## Locus error rates for matching calculations
+```{r}
+ERR.locus <- round(error_rate_fecal$summary_by_locus$Both_Mismatch_Rate, digits = 4) # Individually calculated based on replicates, based on same depth and missingness filtering
+
+min_error <- 1e-4  # Add in a minimum error to allow for some error in 0 error calc loci
+ERR.locus <- pmax(ERR.locus, min_error)
+
+gamma <- 1 - sqrt(1 - ERR.locus)
+```
+## Functions to calculate probabilities of observing a pair of latent diploid genotypes and per locus joint probability array
+```{r}
+# Two homozygous genotypes, two shared alleles 
+# Arguments: a single allele frequency corresponds to the matching allele 
+        hom.hom2.SI <- function(f){ 
+          return(f[1]^2) 
+          } # End joint genotype probability calculation for observing ii/ii given same individual 
+        hom.hom2.U <- function(f){ 
+          return(f[1]^4) 
+          } # End joint genotype probability calculation for observing ii/ii given two unrelated individuals 
+        hom.hom2.PO <- function(f){ 
+          return(f[1]^3) 
+          } # End joint genotype probability calculation for observing ii/ii given a parent offspring relationship 
+        hom.hom2.FS <- function(f){ 
+          return(0.25*f[1]^2 + 0.5*f[1]^3 + 0.25 * f[1]^4) 
+          } # End joint genotype probability calculation for observing ii/ii given two full siblings 
+         
+# Two homozygous genotypes, zero shared alleles 
+# Arguments: vector of two allele frequencies which correspond to one homozygote and second to the other, order doesn't matter 
+        hom.hom0.SI <- function(f){ 
+          return(0) 
+          } # End joint genotype probability calculation for observing ii/jj given same individual 
+        hom.hom0.U <- function(f){ 
+          return(f[1]^2 * f[2]^2) 
+          } # End joint genotype probability calculation for observing ii/jj given two unrelated individuals 
+        hom.hom0.PO <- function(f){ 
+          return(0) 
+          } # End joint genotype probability calculation for observing ii/jj given a parent offspring relationship 
+        hom.hom0.FS <- function(f){ 
+          return(0.25*f[1]^2 * f[2]^2) 
+          } # End joint genotype probability calculation for observing ii/jj given two full siblings 
+           
+      # One homozygote, one heterozygote, one shared allele  
+      # Arguments: vector of two allele frequencies, here the first allele frequency must correspond to the  
+      # homozygous genotype and the second to the novel allele in the heterzygote, e.g. ii/ij => f = c(f_i,f_j). 
+        hom.het1.SI <- function(f){ 
+          return(0) 
+          } # End joint genotype probability calculation for observing ii/ij given same individual 
+        hom.het1.U <- function(f){ 
+          return(2*f[1]^3 * f[2]) 
+          } # End joint genotype probability calculation for observing ii/ij given two unrelated individuals 
+        hom.het1.PO <- function(f){ 
+          return(f[1]^2 * f[2]) 
+          } # End joint genotype probability calculation for observing ii/ij given a parent offspring relationship 
+        hom.het1.FS <- function(f){ 
+          return(0.5*f[1]^2 * f[2] + 2*0.25*f[1]^3 * f[2]) 
+          } # End joint genotype probability calculation for observing ii/ij given two full siblings 
+ 
+# Two heterozygote genotypes, two shared alleles 
+# Arguments: a vector of two allele frequencies, the first allele corresponds to one allele in the heterozygote, and the second the other, order doesn't matter 
+        het.het2.SI <- function(f){ 
+          return(2*f[1] * f[2]) 
+          } # End joint genotype probability calculation for observing ij/ij given same individual 
+        het.het2.U <- function(f){ 
+          return(4*f[1]^2 * f[2]^2) 
+          } # End joint genotype probability calculation for observing ij/ij given two unrelated individuals 
+        het.het2.PO <- function(f){ 
+          return(f[1] * f[2] * (f[1] + f[2]) ) 
+          } # End joint genotype probability calculation for observing ij/ij given a parent offspring relationship 
+        het.het2.FS <- function(f){ 
+          return( (2*0.25*f[1] * f[2]) + (0.5*f[1] * f[2] * (f[1] + f[2]) ) + (4*0.25*f[1]^2 * f[2]^2)) 
+          } # End joint genotype probability calculation for observing ij/ij given two full siblings 
+
+build_joint_snp <- function(p) {
+  
+  # allele frequencies
+  f <- c(a = p, b = 1 - p)
+  
+  # 3 genotypes × 3 genotypes × 4 relationships (SI: same indv, U: unrelated, PO: parent-offspring, FS: full sibs)
+  J <- array(0,
+             dim = c(3, 3, 4),
+             dimnames = list(
+               g1 = c("aa","ab","bb"),
+               g2 = c("aa","ab","bb"),
+               R  = c("SI","U","PO","FS")
+             ))
+  
+  ### 1) aa / aa
+  J[1,1,] <- c(
+    hom.hom2.SI(f["a"]),
+    hom.hom2.U(f["a"]),
+    hom.hom2.PO(f["a"]),
+    hom.hom2.FS(f["a"])
+  )
+  
+  ### 2) bb / bb
+  J[3,3,] <- c(
+    hom.hom2.SI(f["b"]),
+    hom.hom2.U(f["b"]),
+    hom.hom2.PO(f["b"]),
+    hom.hom2.FS(f["b"])
+  )
+  
+  ### 3) aa / bb  and  bb / aa
+  val <- c(
+    hom.hom0.SI(f),
+    hom.hom0.U(f),
+    hom.hom0.PO(f),
+    hom.hom0.FS(f)
+  )
+  J[1,3,] <- val
+  J[3,1,] <- val
+  
+  ### 4) aa / ab  and  ab / aa
+  val <- c(
+    hom.het1.SI(c(f["a"], f["b"])),
+    hom.het1.U(c(f["a"], f["b"])),
+    hom.het1.PO(c(f["a"], f["b"])),
+    hom.het1.FS(c(f["a"], f["b"]))
+  )
+  J[1,2,] <- val
+  J[2,1,] <- val
+  
+  ### 5) bb / ab  and  ab / bb
+  val <- c(
+    hom.het1.SI(c(f["b"], f["a"])),
+    hom.het1.U(c(f["b"], f["a"])),
+    hom.het1.PO(c(f["b"], f["a"])),
+    hom.het1.FS(c(f["b"], f["a"]))
+  )
+  J[3,2,] <- val
+  J[2,3,] <- val
+  
+  ### 6) ab / ab
+  J[2,2,] <- c(
+    het.het2.SI(f),
+    het.het2.U(f),
+    het.het2.PO(f),
+    het.het2.FS(f)
+  )
+  
+  return(J)
+}
+```
+## Build joint array for all loci based on calculated allele frequencies
+```{r}
+L <- length(allele_freq)
+
+joint_array <- array(NA,
+                     dim = c(L, 3, 3, 4),
+                     dimnames = list(
+                       locus = NULL,
+                       g1 = c("aa","ab","bb"),
+                       g2 = c("aa","ab","bb"),
+                       R  = c("SI","U","PO","FS")
+                     ))
+
+for (j in seq_len(L)) {
+  
+  p <- allele_freq[j]
+  
+  if (is.na(p)) next
+  
+  joint_array[j,,,] <- build_joint_snp(p)
+}
+```
+## Per pair likelihood calculation
+```{r}
+# Mismatch matrix
+mismatch <- matrix(
+  c(0,1,2,
+    1,0,1,
+    2,1,0),
+  nrow = 3,
+  byrow = TRUE
+)
+
+# Error log probability
+logP_error <- function(gamma, d, n_a) {
+  d * log(gamma) + (n_a - d) * log(1 - gamma)
+}
+
+# Per pair likelihood function
+compute_pair_logLR <- function(i, k,
+                               geno_matrix,
+                               joint_array,
+                               gamma,
+                               mismatch) {
+  
+  L <- ncol(geno_matrix)
+  logL <- rep(0, 4)  # SI, U, PO, FS
+  
+  for (j in seq_len(L)) {
+    
+    g1 <- geno_matrix[i, j]
+    g2 <- geno_matrix[k, j]
+    
+    if (is.na(g1) || is.na(g2)) next
+    
+    gamma_j <- gamma[j]
+    
+    # Number of alleles observed = 2 per individual
+    n_a <- 2
+    
+    # True genotype combinations (1:3 × 1:3)
+    J <- joint_array[j,,,]  # 3×3×4
+    
+    # Accumulator per relationship
+    Lj <- rep(0, 4)
+    
+    # Sum over k1,k2 (true genotypes)
+    for (k1 in 1:3) {
+      for (k2 in 1:3) {
+        
+        d1 <- mismatch[g1, k1]
+        d2 <- mismatch[g2, k2]
+        
+        logPe1 <- logP_error(gamma_j, d1, n_a)
+        logPe2 <- logP_error(gamma_j, d2, n_a)
+        
+        # joint true genotype probability
+        logJoint <- log(J[k1, k2, ])
+        
+        # accumulate in probability scale
+        Lj <- Lj + exp(logJoint + logPe1 + logPe2)
+      }
+    }
+    
+    logL <- logL + log(Lj)
+  }
+  
+  # log likelihood ratio
+  logLR <- logL[1] - max(logL[2:4])
+  
+  return(logLR)
+}
+```
+## Compute all pairwise LogLR
+### Step 1: Vectorized pair function
+```{r}
+compute_pair_logLR_vec <- function(i, k,
+                                   geno_matrix,
+                                   joint_array,
+                                   gamma,
+                                   mismatch) {
+  
+  g1 <- geno_matrix[i, ]
+  g2 <- geno_matrix[k, ]
+  
+  # Only compute loci where both are genotyped
+  both <- !is.na(g1) & !is.na(g2)
+  if (sum(both) == 0) return(-Inf)
+  
+  g1 <- g1[both]; g2 <- g2[both]
+  gamma_j <- gamma[both]
+  J <- joint_array[both, , , , drop = FALSE]  # n_loci × 3 × 3 × 4
+  
+  n_a <- 2
+  
+  # Precompute error log-probs for all loci and all true genotype combos
+  # d1[j, k1] = mismatch between observed g1[j] and true genotype k1
+  d1 <- mismatch[g1, ]   # n_loci × 3
+  d2 <- mismatch[g2, ]   # n_loci × 3
+  
+  # log P(error) for each locus × true genotype: n_loci × 3
+  logPe1 <- d1 * log(gamma_j) + (n_a - d1) * log(1 - gamma_j)  
+  logPe2 <- d2 * log(gamma_j) + (n_a - d2) * log(1 - gamma_j)  
+  
+  # Sum over all 9 true genotype combinations (k1, k2)
+  # Result: n_loci × 4
+  Lj <- matrix(0, nrow = sum(both), ncol = 4)
+  
+  for (k1 in 1:3) {
+    for (k2 in 1:3) {
+      # J[, k1, k2, ] is n_loci × 4
+      logJoint <- log(J[, k1, k2, ])           # n_loci × 4
+      pe       <- logPe1[, k1] + logPe2[, k2]  # n_loci (scalar per locus)
+      Lj <- Lj + exp(logJoint + pe)             # broadcast pe across 4 cols
+    }
+  }
+  
+  # Sum log-likelihoods across loci
+  logL <- colSums(log(Lj))  # length 4
+  
+  logLR <- logL[1] - max(logL[2:4])
+  return(logLR)
+}
+```
+## Step 2: Chunk pairs to reduce overhead and parallelize to run faster
+```{r}
+library(doParallel)
+library(foreach)
+
+# Set up cluster
+n_cores <- parallel::detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+n <- nrow(geno_matrix)
+
+# Generate all unique pairs
+pairs <- do.call(rbind, lapply(1:(n-1), function(i) data.frame(i = i, k = (i+1):n)))
+
+# Chunk pairs to reduce parallelization overhead
+chunk_size <- 1000
+pair_list <- split(1:nrow(pairs), ceiling(seq_len(nrow(pairs)) / chunk_size))
+
+start_time <- Sys.time()
+
+# Parallel loop over chunks — no .export needed, variables auto-exported
+results_list <- foreach(
+  chunk = pair_list,
+  .combine = c  # combine as a flat list, not rbind
+) %dopar% {
+  lapply(chunk, function(idx) {
+    row <- pairs[idx, ]
+    val <- compute_pair_logLR_vec(row$i, row$k,
+                                  geno_matrix,
+                                  joint_array,
+                                  gamma,
+                                  mismatch)
+    list(i = row$i, k = row$k, logLR = val)
+  })
+}
+
+stopCluster(cl)
+
+end_time <- Sys.time()
+cat("Time elapsed:", difftime(end_time, start_time, units = "mins"), "mins\n")
+
+# Extract results safely from list
+i_idx   <- sapply(results_list, `[[`, "i")
+k_idx   <- sapply(results_list, `[[`, "k")
+logLR_vals <- sapply(results_list, `[[`, "logLR")
+
+# Rebuild symmetric matrix
+logLR_matrix <- matrix(-Inf, n, n)
+logLR_matrix[cbind(i_idx, k_idx)] <- logLR_vals
+logLR_matrix[cbind(k_idx, i_idx)] <- logLR_vals
+diag(logLR_matrix) <- -Inf
+
+rownames(logLR_matrix) <- rownames(geno_matrix)
+colnames(logLR_matrix) <- rownames(geno_matrix)
+
+adj <- logLR_matrix > 0
+```
+## Step 3: Cluster with igraph
+```{r}
+library(igraph)
+
+g <- graph_from_adjacency_matrix(adj,
+                                 mode = "undirected",
+                                 diag = FALSE)
+
+clusters <- components(g)
+```
+# Make sample name and matching data frame
+```{r}
+sample_names <- rownames(geno_matrix)
+
+out_df <- data.frame(
+  Sample = sample_names,
+  Individual_ID = clusters$membership,
+  stringsAsFactors = FALSE
+)
+
+# Individual IDs
+out_df %>% arrange(Individual_ID)
+
+unique(out_df$Individual_ID)
+ 
+df <- left_join(out_df, sample_data, by = c("Sample"="Lab.ID")) %>% select(Sample, Individual_ID, Field.ID, Date, Site, TransectID, qPCR.Mean..ng.uL.) %>% arrange(Individual_ID)
+
+write.csv(df, "output/fecal_opt_matching.csv")
+
+freq_matches <- data.frame(table(out_df$Individual_ID)) %>% arrange(desc(Freq))
+
+freq_matches$Var1 <- as.numeric(freq_matches$Var1) 
+
+ggplot(freq_matches, aes(x=Freq)) +
+  geom_histogram(bins = 3, colour = "black") +
+  theme(text=element_text(size=15)) +
+  xlab("Number of Sample Captures") +
+  ylab("Number of Individuals")
 ```
