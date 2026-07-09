@@ -154,9 +154,9 @@ calculate_gt_pairs_errors <- function(paired_gt_df) {
 ```
 # Read in sample data
 ```{r}
-snps_vcfR <- read.vcfR("/mnt/ceph/estacy/SBTDeer/Tissue_samples/05_filter/populations_R0.5_mac2/populations.snps.vcf")
+snps_vcfR <- read.vcfR("tissue.populations.snps.vcf")
 
-locations <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Tissue_locations.csv", na.strings = c("","NA"))
+locations <- read.csv("Tissue_metadata.csv", na.strings = c("","NA"))
 
 locations <- locations %>%
   mutate(
@@ -177,7 +177,7 @@ locations <- locations %>%
 
 # Subset (whitelist) to designed panel loci
 ```{r}
-panel_snps <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
+panel_snps <- read.csv("SBTDeer_248_Loci_Names.csv", header = F)
 
 # Whitelist snps panel was designed for only
 panel_snps <- panel_snps %>%
@@ -241,7 +241,7 @@ pair_err_summ <- pair_errors %>% # Summarize mismatch data
     Avg_Missing = round(mean(Missing_Full, na.rm = TRUE), 1)
   )
 
-png("figures/tissues_manuscript/Supp_error_rates.png", width = 3000, height = 2000, res = 600)
+png("figures/Supp_error_rates.png", width = 3000, height = 2000, res = 600)
 # Plot error rates
 ggplot(pair_err_summ, aes(x=Missing, y = Depth, fill = Avg_Mismatch)) +
   geom_tile() +
@@ -804,7 +804,7 @@ p <- plotQ(
 )
 
 #c("Kodiak", "SCAK", "NSEAK", "Unknown", "CSEAK", "SSEAK", "B.C.", "Haida Gwaii")
-png("figures/tissues_manuscript/SBTD_admixture.png", width = 6000, height = 6000, res = 600)
+png("figures/SBTD_admixture.png", width = 6000, height = 6000, res = 600)
 grid.arrange(p$plot[[1]])
 dev.off()
 ```
@@ -910,14 +910,6 @@ p2 <- ggplot(pop_summary, aes(x = label, y = MAF, fill = Broad_region)) +
     axis.title.y = element_text(size = 12)
   )
 ```
-# Save boxplot
-```{r}
-png("figures/tissues_manuscript/SBTD_panel_het_maf_region_boxplots.png", width = 5000, height = 3000, res = 600)
-
-grid.arrange(p1, p2, ncol = 1, heights = c(1,1.6))
-
-dev.off()
-```
 ### Number variable by region
 ```{r}
 invar_summary_df <- pop_summary %>%
@@ -935,7 +927,6 @@ var_summary_df <- pop_summary %>%
   summarise(n_loci = n()) %>%      # count number of loci
   arrange(n_loci)           # sort by count
 
-var_summary_df
 
 left_join(var_summary_df, invar_summary_df)
 ```
@@ -1093,13 +1084,13 @@ p_PIDsib <- ggplot(all_PID, aes(x = Loci, y = Avg.PIDsib, color = Population)) +
 ```
 ### Save plots
 ```{r}
-png("figures/tissues_manuscript/SBTD_PIDsib.png", width = 5000, height = 3000, res = 600)
+png("figures/SBTD_PIDsib.png", width = 5000, height = 3000, res = 600)
 
 p_PIDsib
 
 dev.off()
 
-png("figures/tissues_manuscript/SBTD_PID.png", width = 5000, height = 3000, res = 600)
+png("figures/SBTD_PID.png", width = 5000, height = 3000, res = 600)
 
 p_PID
 
@@ -1148,7 +1139,7 @@ recommended <- var_loci_df %>% filter(!Locus %in% unique(HWE_high_het$Locus))
 ```
 # Create recommended loci table
 ```{r}
-F_R_seq <- read.csv("data/F_R_sequences.csv")
+F_R_seq <- read.csv("SBTD_F_R_sequences.csv")
 F_R_seq$CHROM_POS <- paste(F_R_seq$CHROM,F_R_seq$POS, sep = "_")
 
 locus_info <- data.frame(vcfR_panel_filt@fix) %>% select(CHROM:ALT)
@@ -1166,9 +1157,9 @@ write.csv(recommended_table, file = "output/recommended_locus_set_by_region.csv"
 
 # Fecal Opt matching test
 ```{r}
-vcfR_f_opt <- read.vcfR("../Fecal_samples/Fecal_Opt_1/Populations_Runs/Populations_EDeer_R50_mac3/populations.snps.vcf")
+vcfR_f_opt <- read.vcfR("fecal.populations.snps.vcf")
 
-panel_snps <- read.csv("/mnt/ceph/estacy/SBTDeer/R_analysis/data/Eacker_Deer_248_Loci_Names.csv", header = F)
+panel_snps <- read.csv("SBTDeer_248_Loci_Names.csv", header = F)
 
 # Whitelist snps panel was designed for only
 panel_snps <- panel_snps %>%
@@ -1182,8 +1173,7 @@ panel_keys <- paste(panel_snps$CHROM, panel_snps$POS, sep = "_")
 vcfR_f_opt_panel <- vcfR_f_opt[vcf_keys %in% panel_keys, ]
 ```
 ```{r}
-sample_data <- read.csv("data/SBTD-ED Metadata 2018-2025.csv")
-vcfR_f_opt_panel
+sample_data <- read.csv("Fecal_metadata.csv")
 
 vcfR_f_opt_dp <- hard_filter(vcfR_f_opt_panel, depth = 5, gq = 30)
 
@@ -1192,10 +1182,6 @@ vcfR_f_opt_miss <- missing_by_sample(vcfR_f_opt_dp, cutoff = 0.8)
 vcfR_f_opt_miss_snp <- missing_by_snp(vcfR_f_opt_miss, cutoff = 0.1)
 
 fecal_opt_samples <- data.frame(Lab.ID = sub(".*_","", colnames(vcfR_f_opt_miss@gt[,2:85])) %>% unique())
-
-left_join(fecal_opt_samples, sample_data)
-
-data.frame(t(extract.gt(vcfR_f_opt_miss, element = "GT")))
 ```
 ```{r}
 popmap_fecal <- data.frame(id = colnames(vcfR_f_opt_miss_snp@gt[,2:85]))
